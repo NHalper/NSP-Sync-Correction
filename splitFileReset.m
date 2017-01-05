@@ -2,7 +2,7 @@ function splitFileResets
 
 % splitFileResets
 % 
-% Opens and splits both an NEV and NSx file in pieces timewise along clock
+% Opens and splits both an NEV and NSx file in pieces timewise at clock
 % restarts.
 %
 % Use splitFileResets
@@ -184,7 +184,7 @@ for idx = 1:contSegmentCount
     fseek(contFID,-9,'cof');
     fseek(contFID,5,'cof');
     contNumberOfDataPoints      = fread(contFID,1,'uint32');
-    contdataSegment             = fread(contFID,contNumberOfDataPoints*contchannelCount* 2,'*char');
+    contdataSegment             = fread(contFID,contNumberOfDataPoints*contchannelCount* 2,'*uint8');
     fprintf('Writing NSx segment %d... ', idx);
     if ~isempty(find(RestartIndex==idx))
         fwrite(contFIDw, contTotalHeaders, 'char');
