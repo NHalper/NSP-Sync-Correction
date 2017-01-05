@@ -641,21 +641,23 @@ if Method == 1
         end
     end
     
-    DataToResample = find(AnalogInputCounts==max(AnalogInputCounts));
-    if length(DataToResample) > 1 && SelectUpsampleNSP == 0
-        disp('Both files have the same number of analog inputs. Cannot distinguish NSP 1.5. Ending script. No data was synced.')
-        return
-    elseif length(DataToResample) == 1 && SelectUpsampleNSP == 0
-        
-    elseif SelectUpsampleNSP == 1
-        DataToResample = 1;
-    elseif SelectUpsampleNSP == 2
-        DataToResample = 2;
-    else
-        disp('Unknown condition occurred in predition method. Ending Script. No data was synced');
-        return
+    DataToResample = [];
+    for i = 1:NumberOfFiles
+        if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
+            TempNEV = openNEV(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev']),'nosave','nomat');
+            disp(strcat('Found:',fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])));
+            if ~isempty(NEV.Data.SerialDigitalIO.TimeStamp) 
+                if isempty(DataToResample)
+                    DataToResample = i;
+                else
+                    disp('Multiple files contain digital events. Cannot distinguish NSP 1.5');
+                    return
+                end
+            end
+        end 
     end
-
+    
+    clear TempNEV
 
     for i = 1:NumberOfFiles
         disp('Calculations complete. Opening full data file for drift correction. This may take a long while.')
