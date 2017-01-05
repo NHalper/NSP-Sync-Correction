@@ -27,6 +27,9 @@ function splitFileResets
 % 1.0.0.0:
 %   - Initial release.
 %
+% 1.1.0.0:
+%   - Improved RAM usage and corrected a few bugs with segment assigments
+%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %
 
