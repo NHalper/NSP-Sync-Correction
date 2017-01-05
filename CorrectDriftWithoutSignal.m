@@ -1,4 +1,4 @@
-function NSPSyncWithoutSignal (ForceHFMethod,ForceLFMethod,ForcePredictionMethod,SelectUpsampleNSP) 
+function CorrectDriftWithoutSignal (ForceHFMethod,ForceLFMethod,ForcePredictionMethod,SelectUpsampleNSP) 
 %% 
 % 
 % 
