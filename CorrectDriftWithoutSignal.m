@@ -13,7 +13,10 @@ function CorrectDriftWithoutSignal (ForceHFMethod,ForceLFMethod,ForcePredictionM
 % - Corrected an issue that would cause the program to fail to
 % find NEV files under the low-frequency method.
 %
-Version = '1.6';
+% Version 1.7
+% - Added modifications to process the files in pieces and therefore reduce
+% RAM.
+Version = '1.7';
 
 TestMethod = 1; %Flag to set for faster processing method
 
@@ -47,6 +50,10 @@ fprintf(ReportFID,'\n');
 
 for i = 1:NumberOfFiles
     NSP{i} = openNSx(Filename{i},strcat('c:',Channel{i},':',Channel{i}));
+end
+
+for i = 1:NumberOfFiles
+    NSPMetaInfo{i} = openNSx(Filename{i},'noread');
 end
 % clear TempMetaData
 clear Channel
@@ -168,54 +175,75 @@ if Method == 1
     fprintf(ReportFID,'lagdiff:');
     fprintf(ReportFID,num2str(lagdiff));
     fprintf(ReportFID,'\n');
+    
     for i = 1:NumberOfFiles
-        NSP{i} = openNSx(Filename{i});
-        if Cell == 1;     
-            NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
-            NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
-        else
+        NSPThirds{i,1} = floor(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3);
+        NSPThirds{i,2} = floor(2*(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3));
+        NSPThirds{i,3} = length(NSPMetaInfo{i}.MetaTags.ChannelID);
+    end
+    
+    %Do once for each section of thirds created just above
+    for idx = 1:3
+        for i = 1:NumberOfFiles
+            switch(idx)
+                case 1;
+                    NSP{i} = openNSx(Filename{i},['c:' num2str(1) ':' num2str(NSPThirds{i,1})]);
+                    
+                case 2;
+                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,1}+1) ':' num2str(NSPThirds{i,2})]);
+                    
+                case 3;
+                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,2}+1) ':' num2str(NSPThirds{i,3})]);
+                    
+            end
+            if Cell == 1;     
+                NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
+                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+            else
 
+            end
         end
-    end
-    DriftAmount = abs(lagdiff - firstlagdiff)
-    fprintf(ReportFID,'Total Drift Amount:');
-    fprintf(ReportFID,num2str(DriftAmount));
-    fprintf(ReportFID,'\n');
-    OriginalLength = length(NSP{DataToResample}.Data);
-    ResamplePeriod = round(EndPoint/DriftAmount);
-%     OriginalSamplingRate = 30000;
-%     NewSamplingRate = 30000 + 30000/ResamplePeriod;
-%     [p,q] = rat(NewSamplingRate/OriginalSamplingRate);
-%     DataForResampling = resample(double(DataForResampling),p,q);
-    TotalPeriods = round(EndPoint/ResamplePeriod); %This is basically just equal to drift amount, but it looks nice
-    
-    if TestMethod == 1
-        tic
-            RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
-            RepeatingArray(1:ResamplePeriod:end) = 2;
-            NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
-        toc
-    else
-        for period = 1:TotalPeriods
-                tic
-                NSP{DataToResample}.Data = [NSP{DataToResample}.Data(:,1:ResamplePeriod*period) NSP{DataToResample}.Data(:,ResamplePeriod*period:end)];
-                disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                t = toc;
-                EstimatedTimeLeft = t*(TotalPeriods-period);
-                disp(strcat('Estimated Time Left: ',num2str(EstimatedTimeLeft),' Seconds'))
+        DriftAmount = abs(lagdiff - firstlagdiff)
+        fprintf(ReportFID,'Total Drift Amount:');
+        fprintf(ReportFID,num2str(DriftAmount));
+        fprintf(ReportFID,'\n');
+        OriginalLength = length(NSP{DataToResample}.Data);
+        ResamplePeriod = round(EndPoint/DriftAmount);
+    %     OriginalSamplingRate = 30000;
+    %     NewSamplingRate = 30000 + 30000/ResamplePeriod;
+    %     [p,q] = rat(NewSamplingRate/OriginalSamplingRate);
+    %     DataForResampling = resample(double(DataForResampling),p,q);
+        TotalPeriods = round(EndPoint/ResamplePeriod); %This is basically just equal to drift amount, but it looks nice
+
+        if TestMethod == 1
+            tic
+                RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
+                RepeatingArray(1:ResamplePeriod:end) = 2;
+                NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
+            toc
+        else
+            for period = 1:TotalPeriods
+                    tic
+                    NSP{DataToResample}.Data = [NSP{DataToResample}.Data(:,1:ResamplePeriod*period) NSP{DataToResample}.Data(:,ResamplePeriod*period:end)];
+                    disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                    t = toc;
+                    EstimatedTimeLeft = t*(TotalPeriods-period);
+                    disp(strcat('Estimated Time Left: ',num2str(EstimatedTimeLeft),' Seconds'))
+            end
         end
-    end
+
+        %Correct disparity between the files caused by resynchronization
+        for i = 1:NumberOfFiles
+            NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
+        end
+
+        MethodComment = 'Sync Method: High Frequency Method';
+        NSP{1}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
+        NSP{2}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
+        saveNSxSync(NSP{1});
+        saveNSxSync(NSP{2});
     
-    %Correct disparity between the files caused by resynchronization
-    for i = 1:NumberOfFiles
-        NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
     end
-    
-    MethodComment = 'Sync Method: High Frequency Method';
-    NSP{1}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-    NSP{2}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-    saveNSxSync(NSP{1});
-    saveNSxSync(NSP{2});
     
     %Handle Additional File Types
     for i = 1:NumberOfFiles
@@ -233,55 +261,78 @@ if Method == 1
             
             
         for Type = ValidFileTypes{i}
-            TempFilename = fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename FileExtTypes{Type}])
+            TempFilename = fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename FileExtTypes{Type}]);
             
             if exist(TempFilename)
                 disp(strcat('Found:',TempFilename));
                 TempStructure = openNSx(TempFilename,'noread');
                 EndPacket = TempStructure.MetaTags.DataPoints;
                 TimestampScale = 30000/TempStructure.MetaTags.SamplingFreq;
-                clear TempStructure
-                NSx = openNSx(TempFilename);
-                if DataToResample == i
-                    if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
-                        %disp('This function does not work on paused data currently');
+                
+                
 
-                        NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
-                        NSx.MetaTags.Timestamp = 0;
-                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                        TempEndPoint = round(EndPoint/TimestampScale);
-                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                        if TestMethod == 1
-                            tic
-                            RepeatingArray = ones(1,length(NSx.Data));
-                            RepeatingArray(1:TempResamplePeriod:end) = 2;
-                            NSx.Data = repelem(NSx.Data,1,RepeatingArray);
-                            toc
-                        else
-                            if TotalPeriods > 1
-                                for period = 1:TotalPeriods
-                                    NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                    disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                    for ixxy = 1:3
+                        NSPThirds(1) = floor(length(TempStructure.MetaTags.ChannelID)/3);
+                        NSPThirds(2) = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
+                        NSPThirds(3) = length(TempStructure.MetaTags.ChannelID);
+
+
+
+                        switch(idx)
+                            case 1;
+                                NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds(1))]);
+                                
+                            case 2;
+                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(1)+1) ':' num2str(NSPThirds(2))]);
+                               
+                            case 3;
+                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(2)+1) ':' num2str(NSPThirds(3))]);
+                                
+                        end
+
+                        %NSx = openNSx(TempFilename);
+                        if DataToResample == i
+                            if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
+                                %disp('This function does not work on paused data currently');
+
+                                NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
+                                NSx.MetaTags.Timestamp = 0;
+                                TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                                TempEndPoint = round(EndPoint/TimestampScale);
+                                TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
+                                if TestMethod == 1
+                                    tic
+                                    RepeatingArray = ones(1,length(NSx.Data));
+                                    RepeatingArray(1:TempResamplePeriod:end) = 2;
+                                    NSx.Data = repelem(NSx.Data,1,RepeatingArray);
+                                    toc
+                                else
+                                    if TotalPeriods > 1
+                                        for period = 1:TotalPeriods
+                                            NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
+                                            disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                                        end
+                                    end
+                                end
+
+                            elseif not(iscell(NSx.Data))
+                                NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
+                                TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                                TempEndPoint = round(EndPoint/TimestampScale);
+                                TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
+                                if TotalPeriods > 1
+                                    for period = 1:TotalPeriods
+                                        NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
+                                        disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                                    end
                                 end
                             end
                         end
 
-                    elseif not(iscell(NSx.Data))
-                        NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
-                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                        TempEndPoint = round(EndPoint/TimestampScale);
-                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                        if TotalPeriods > 1
-                            for period = 1:TotalPeriods
-                                NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                            end
-                        end
+
+                        saveNSxSync(NSx);
                     end
-                end
                 
-                
-                saveNSxSync(NSx);
             end
         end
         
@@ -424,60 +475,78 @@ if Method == 1
     fprintf(ReportFID,'lagdiff:');
     fprintf(ReportFID,num2str(lagdiff));
     fprintf(ReportFID,'\n');
+    
     for i = 1:NumberOfFiles
-        NSP{i} = openNSx(Filename{i});
-        if Cell == 1;     
-            NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
-            NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
-        else
+        NSPThirds{i,1} = floor(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3);
+        NSPThirds{i,2} = floor(2*(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3));
+        NSPThirds{i,3} = length(NSPMetaInfo{i}.MetaTags.ChannelID);
+    end
+    
+    %Do once for each section of thirds created just above
+    for idx = 1:3
+        for i = 1:NumberOfFiles
+            switch(idx)
+                case 1;
+                    NSP{i} = openNSx(Filename{i},['c:' num2str(1) ':' num2str(NSPThirds{i,1})]);
+                    
+                case 2;
+                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,1}+1) ':' num2str(NSPThirds{i,2})]);
+                    
+                case 3;
+                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,2}+1) ':' num2str(NSPThirds{i,3})]);   
+            end
+            if Cell == 1;     
+                NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
+                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+            else
 
+            end
         end
-    end
-    DriftAmount = abs(lagdiff - firstlagdiff);
-    fprintf(ReportFID,'Drift Amount:');
-    fprintf(ReportFID,num2str(DriftAmount));
-    fprintf(ReportFID,'\n');
-    OriginalLength = length(NSP{DataToResample}.Data);
-    ResamplePeriod = round(EndPoint/DriftAmount);
-    % Our frequency adjustments are too small for the Matlab resampling to
-    % handle
-%     OriginalSamplingRate = 30000;
-%     NewSamplingRate = 30000 + 30000/ResamplePeriod;
-%     [p,q] = rat(NewSamplingRate/OriginalSamplingRate);
-%     DataForResampling = resample(double(DataForResampling),p,q);
-    TotalPeriods = round(EndPoint/ResamplePeriod); %This is basically just equal to drift amount, but it looks nice
-    
-    
-   if TestMethod == 1
-        tic
-            RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
-            RepeatingArray(1:ResamplePeriod:end) = 2;
-            NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
-        toc
-   else
-        for period = 1:TotalPeriods
+        DriftAmount = abs(lagdiff - firstlagdiff);
+        fprintf(ReportFID,'Drift Amount:');
+        fprintf(ReportFID,num2str(DriftAmount));
+        fprintf(ReportFID,'\n');
+        OriginalLength = length(NSP{DataToResample}.Data);
+        ResamplePeriod = round(EndPoint/DriftAmount);
+        % Our frequency adjustments are too small for the Matlab resampling to
+        % handle
+    %     OriginalSamplingRate = 30000;
+    %     NewSamplingRate = 30000 + 30000/ResamplePeriod;
+    %     [p,q] = rat(NewSamplingRate/OriginalSamplingRate);
+    %     DataForResampling = resample(double(DataForResampling),p,q);
+        TotalPeriods = round(EndPoint/ResamplePeriod); %This is basically just equal to drift amount, but it looks nice
+
+
+       if TestMethod == 1
             tic
-            NSP{DataToResample}.Data = [NSP{DataToResample}.Data(:,1:ResamplePeriod*period) NSP{DataToResample}.Data(:,ResamplePeriod*period:end)];
-            disp([num2str(period) 'of' num2str(TotalPeriods)]);
-            t = toc;
-            EstimatedTimeLeft = t*(TotalPeriods-period);
-            disp(strcat('Estimated Time Left: ',num2str(EstimatedTimeLeft),' Seconds'))
+                RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
+                RepeatingArray(1:ResamplePeriod:end) = 2;
+                NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
+            toc
+       else
+            for period = 1:TotalPeriods
+                tic
+                NSP{DataToResample}.Data = [NSP{DataToResample}.Data(:,1:ResamplePeriod*period) NSP{DataToResample}.Data(:,ResamplePeriod*period:end)];
+                disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                t = toc;
+                EstimatedTimeLeft = t*(TotalPeriods-period);
+                disp(strcat('Estimated Time Left: ',num2str(EstimatedTimeLeft),' Seconds'))
+            end
+       end
+
+
+        %Correct disparity between the files caused by resynchronization
+        for i = 1:NumberOfFiles
+            NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
         end
-   end
-    
-    
-    %Correct disparity between the files caused by resynchronization
-    for i = 1:NumberOfFiles
-        NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
+
+        MethodComment = 'Sync Method: Low Frequency Method';
+        NSP{1}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
+        NSP{2}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
+
+        saveNSxSync(NSP{1});
+        saveNSxSync(NSP{2});
     end
-    
-    MethodComment = 'Sync Method: Low Frequency Method';
-    NSP{1}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-    NSP{2}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-    
-    saveNSxSync(NSP{1});
-    saveNSxSync(NSP{2});
-    
     
     %Handle Additional File Types
     for i = 1:NumberOfFiles
@@ -501,24 +570,57 @@ if Method == 1
                 TempStructure = openNSx(TempFilename,'noread');
                 EndPacket = TempStructure.MetaTags.DataPoints;
                 TimestampScale = 30000/TempStructure.MetaTags.SamplingFreq;
-                clear TempStructure
-                NSx = openNSx(TempFilename);
-                if DataToResample == i
-                    if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
-                        %disp('This function does not work on paused data currently');
+                
+                 for ixxy = 1:3
+                            NSPThirds(1) = floor(length(TempStructure.MetaTags.ChannelID)/3);
+                            NSPThirds(2) = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
+                            NSPThirds(3) = length(TempStructure.MetaTags.ChannelID);
 
-                        NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
-                        NSx.MetaTags.Timestamp = 0;
-                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                        TempEndPoint = round(EndPoint/TimestampScale);
-                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                        if TestMethod == 1
-                            tic
-                            RepeatingArray = ones(1,length(NSx.Data));
-                            RepeatingArray(1:TempResamplePeriod:end) = 2;
-                            NSx.Data = repelem(NSx.Data,1,RepeatingArray);
-                            toc
-                        else
+
+
+                            switch(idx)
+                                case 1;
+                                    NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds(1))]);
+
+                                case 2;
+                                    NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(1)+1) ':' num2str(NSPThirds(2))]);
+
+                                case 3;
+                                    NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(2)+1) ':' num2str(NSPThirds(3))]);
+
+                            end
+
+
+                    %NSx = openNSx(TempFilename);
+                    if DataToResample == i
+                        if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
+                            %disp('This function does not work on paused data currently');
+
+                            NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
+                            NSx.MetaTags.Timestamp = 0;
+                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                            TempEndPoint = round(EndPoint/TimestampScale);
+                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
+                            if TestMethod == 1
+                                tic
+                                RepeatingArray = ones(1,length(NSx.Data));
+                                RepeatingArray(1:TempResamplePeriod:end) = 2;
+                                NSx.Data = repelem(NSx.Data,1,RepeatingArray);
+                                toc
+                            else
+                                if TotalPeriods > 1
+                                    for period = 1:TotalPeriods
+                                        NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
+                                        disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                                    end
+                                end
+                            end
+
+                        elseif not(iscell(NSx.Data))
+                            NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
+                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                            TempEndPoint = round(EndPoint/TimestampScale);
+                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
                             if TotalPeriods > 1
                                 for period = 1:TotalPeriods
                                     NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
@@ -526,23 +628,11 @@ if Method == 1
                                 end
                             end
                         end
-
-                    elseif not(iscell(NSx.Data))
-                        NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
-                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                        TempEndPoint = round(EndPoint/TimestampScale);
-                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                        if TotalPeriods > 1
-                            for period = 1:TotalPeriods
-                                NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                            end
-                        end
                     end
-                end
-                
-                
-                saveNSxSync(NSx)
+
+
+                    saveNSxSync(NSx)
+                 end
             end
         end
         
@@ -599,10 +689,6 @@ end
 
 %% Complete Prediction Method
 
-
-%Top PFC
-%Bottom FEF (Analog Inputs)
-
 fprintf(ReportFID,'Mode:');
 fprintf(ReportFID,'Prediction');
 fprintf(ReportFID,'\n');
@@ -642,72 +728,93 @@ if Method == 1
     end
     
     DataToResample = [];
+%     for i = 1:NumberOfFiles
+%         if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
+%             TempNEV = openNEV(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev']),'nosave','nomat');
+%             disp(strcat('Found:',fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])));
+%             if ~isempty(NEV.Data.SerialDigitalIO.TimeStamp) 
+%                 if isempty(DataToResample)
+%                     DataToResample = i;
+%                 else
+%                     disp('Multiple files contain digital events. Cannot distinguish NSP 1.5');
+%                     return
+%                 end
+%             end
+%         end 
+%     end
+      DataToResample = 1;
+      
+  
+    
     for i = 1:NumberOfFiles
-        if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
-            TempNEV = openNEV(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev']),'nosave','nomat');
-            disp(strcat('Found:',fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])));
-            if ~isempty(NEV.Data.SerialDigitalIO.TimeStamp) 
-                if isempty(DataToResample)
-                    DataToResample = i;
-                else
-                    disp('Multiple files contain digital events. Cannot distinguish NSP 1.5');
-                    return
-                end
+        NSPThirds{i,1} = floor(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3);
+        NSPThirds{i,2} = floor(2*(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3));
+        NSPThirds{i,3} = length(NSPMetaInfo{i}.MetaTags.ChannelID);
+    end
+    
+    %Do once for each section of thirds created just above
+    for idx = 1:3
+
+        for i = 1:NumberOfFiles
+            disp('Calculations complete. Opening full data file for drift correction. This may take a long while.')
+            switch(idx)
+                case 1;
+                    NSP{i} = openNSx(Filename{i},['c:' num2str(1) ':' num2str(NSPThirds{i,1})]);
+                    
+                case 2;
+                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,1}+1) ':' num2str(NSPThirds{i,2})]);
+                    
+                case 3;
+                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,2}+1) ':' num2str(NSPThirds{i,3})]);
+                    
             end
-        end 
-    end
-    
-    clear TempNEV
-
-    for i = 1:NumberOfFiles
-        disp('Calculations complete. Opening full data file for drift correction. This may take a long while.')
-        NSP{i} = openNSx(Filename{i});
-        if Cell == 1
-            NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
-            NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+            if Cell == 1
+                NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
+                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+            end
         end
-    end
-    
-    OriginalLength = length(NSP{DataToResample}.Data);
-    DriftAmount = 100*(OriginalLength/(30000*60*5)); %We see around 100 samples loss every 5 minutes on most of these NSPs.
-    fprintf(ReportFID,'Drift Amount:');
-    fprintf(ReportFID,num2str(DriftAmount));
-    fprintf(ReportFID,'\n');
-    ResamplePeriod = round(EndPoint/DriftAmount);
-    
-    TotalPeriods = EndPoint/ResamplePeriod; %This is basically just equal to drift amount, but it looks nice
 
-    if TestMethod == 1
-        tic
-            RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
-            RepeatingArray(1:ResamplePeriod:end) = 2;
-            NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
-        toc
-    else
-        for period = 1:TotalPeriods
+        OriginalLength = length(NSP{DataToResample}.Data);
+        DriftAmount = 100*(OriginalLength/(30000*60*5)); %We see around 100 samples loss every 5 minutes on most of these NSPs.
+        fprintf(ReportFID,'Drift Amount:');
+        fprintf(ReportFID,num2str(DriftAmount));
+        fprintf(ReportFID,'\n');
+        ResamplePeriod = round(EndPoint/DriftAmount);
+
+        TotalPeriods = EndPoint/ResamplePeriod; %This is basically just equal to drift amount, but it looks nice
+
+        if TestMethod == 1
             tic
-            NSP{DataToResample}.Data = [NSP{DataToResample}.Data(:,1:ResamplePeriod*period) NSP{DataToResample}.Data(:,ResamplePeriod*period:end)];
-            disp([num2str(period) 'of' num2str(TotalPeriods)]);
-            t = toc;
-            EstimatedTimeLeft = t*(TotalPeriods-period);
-            disp(strcat('Estimated Time Left: ',num2str(EstimatedTimeLeft),' Seconds'))
+                RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
+                RepeatingArray(1:ResamplePeriod:end) = 2;
+                NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
+            toc
+        else
+            for period = 1:TotalPeriods
+                tic
+                NSP{DataToResample}.Data = [NSP{DataToResample}.Data(:,1:ResamplePeriod*period) NSP{DataToResample}.Data(:,ResamplePeriod*period:end)];
+                disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                t = toc;
+                EstimatedTimeLeft = t*(TotalPeriods-period);
+                disp(strcat('Estimated Time Left: ',num2str(EstimatedTimeLeft),' Seconds'))
+            end
         end
-    end
 
 
-    
-    %Correct disparity between the files caused by resynchronization
-    for i = 1:NumberOfFiles
-        NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
+
+        %Correct disparity between the files caused by resynchronization
+        for i = 1:NumberOfFiles
+            NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
+        end
+
+        MethodComment = 'Sync Method: Prediction Method';
+        NSP{1}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
+        NSP{2}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
+
+
+        saveNSxSync(NSP{1});
+        saveNSxSync(NSP{2});
     end
-    
-    MethodComment = 'Sync Method: Prediction Method';
-    NSP{1}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-    NSP{2}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-    
-    
-    saveNSxSync(NSP{1});
-    saveNSxSync(NSP{2});
     
     %Handle Additional File Types
     for i = 1:NumberOfFiles
@@ -731,24 +838,57 @@ if Method == 1
                 TempStructure = openNSx(TempFilename,'noread');
                 EndPacket = TempStructure.MetaTags.DataPoints;
                 TimestampScale = 30000/TempStructure.MetaTags.SamplingFreq;
-                clear TempStructure
-                NSx = openNSx(TempFilename);
-                if DataToResample == i
-                    if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
-                        %disp('This function does not work on paused data currently');
 
-                        NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
-                        NSx.MetaTags.Timestamp = 0;
-                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                        TempEndPoint = round(EndPoint/TimestampScale);
-                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                        if TestMethod == 1
-                            tic
-                            RepeatingArray = ones(1,length(NSx.Data));
-                            RepeatingArray(1:TempResamplePeriod:end) = 2;
-                            NSx.Data = repelem(NSx.Data,1,RepeatingArray);
-                            toc
-                        else
+                 for ixxy = 1:3
+                        NSPThirds{1,1} = floor(length(TempStructure.MetaTags.ChannelID)/3);
+                        NSPThirds{1,2} = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
+                        NSPThirds{1,3} = length(TempStructure.MetaTags.ChannelID);
+
+
+                        
+
+                        switch(idx)
+                            case 1;
+                                NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds{1,1})]);
+                                
+                            case 2;
+                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds{1,1}+1) ':' num2str(NSPThirds{1,2})]);
+                               
+                            case 3;
+                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds{1,2}+1) ':' num2str(NSPThirds{1,3})]);
+                                
+                        end
+                
+                    %NSx = openNSx(TempFilename);
+                    if DataToResample == i
+                        if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
+                            %disp('This function does not work on paused data currently');
+
+                            NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
+                            NSx.MetaTags.Timestamp = 0;
+                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                            TempEndPoint = round(EndPoint/TimestampScale);
+                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
+                            if TestMethod == 1
+                                tic
+                                RepeatingArray = ones(1,length(NSx.Data));
+                                RepeatingArray(1:TempResamplePeriod:end) = 2;
+                                NSx.Data = repelem(NSx.Data,1,RepeatingArray);
+                                toc
+                            else
+                                if TotalPeriods > 1
+                                    for period = 1:TotalPeriods
+                                        NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
+                                        disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                                    end
+                                end
+                            end
+
+                        elseif not(iscell(NSx.Data))
+                            NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
+                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                            TempEndPoint = round(EndPoint/TimestampScale);
+                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
                             if TotalPeriods > 1
                                 for period = 1:TotalPeriods
                                     NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
@@ -756,23 +896,11 @@ if Method == 1
                                 end
                             end
                         end
-
-                    elseif not(iscell(NSx.Data))
-                        NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
-                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                        TempEndPoint = round(EndPoint/TimestampScale);
-                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                        if TotalPeriods > 1
-                            for period = 1:TotalPeriods
-                                NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                            end
-                        end
                     end
-                end
-                
-                
-                saveNSxSync(NSx)
+
+
+                    saveNSxSync(NSx)
+                 end
             end
         end
         
@@ -827,3 +955,4 @@ else
 end 
 
 %% Wrap Up
+
