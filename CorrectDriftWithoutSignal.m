@@ -728,20 +728,20 @@ if Method == 1
     end
     
     DataToResample = [];
-%     for i = 1:NumberOfFiles
-%         if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
-%             TempNEV = openNEV(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev']),'nosave','nomat');
-%             disp(strcat('Found:',fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])));
-%             if ~isempty(NEV.Data.SerialDigitalIO.TimeStamp) 
-%                 if isempty(DataToResample)
-%                     DataToResample = i;
-%                 else
-%                     disp('Multiple files contain digital events. Cannot distinguish NSP 1.5');
-%                     return
-%                 end
-%             end
-%         end 
-%     end
+     for i = 1:NumberOfFiles
+         if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
+             TempNEV = openNEV(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev']),'nosave','nomat');
+             disp(strcat('Found:',fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])));
+             if ~isempty(NEV.Data.SerialDigitalIO.TimeStamp) 
+                 if isempty(DataToResample)
+                     DataToResample = i;
+                 else
+                     disp('Multiple files contain digital events. Cannot distinguish NSP 1.5');
+                     return
+                 end
+             end
+         end 
+     end
       DataToResample = 1;
       
   
