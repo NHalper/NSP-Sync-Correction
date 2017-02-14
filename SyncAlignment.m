@@ -13,6 +13,7 @@ function SyncAlignment(NumberOfFiles)
 % Version 1.0
 % V1.00 = Initial Release
 % V1.01 = Corrected issue that would allow the function to read non-30k files.
+% V1.02 = Corrected an issue that would have allowed NS6 files to incorrectly erase their non-zero timestamp starts if an NS5 file was used as the base file
 
 
 NSPInfo = {};
@@ -79,7 +80,9 @@ end
 %array
 for i = 1:NumberOfFiles
     NSPData = openNSx(NSPFilenames{i});
-    NSPData.Data = [repmat(0,size(NSPData.Data,1),(max(CodeTimestamps)-CodeTimestamps(i))+NSPData.MetaTags.Timestamp) NSPData.Data];
+    TimestampScale = 30000/NSPData.MetaTags.SamplingFreq;
+    %NSPData.Data = [repmat(0,size(NSPData.Data,1),(max(CodeTimestamps)-CodeTimestamps(i))+NSPData.MetaTags.Timestamp) NSPData.Data];
+    NSPData.Data = [repmat(0,size(NSPData.Data,1),round((max(CodeTimestamps)-CodeTimestamps(i))/TimestampScale + NSPData.MetaTags.Timestamp)) NSPData.Data];
     NSPData.MetaTags.Timestamp = 0;
     saveNSxSync(NSPData);
     for Type = ValidTypesIndices
