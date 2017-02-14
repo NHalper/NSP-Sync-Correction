@@ -12,7 +12,7 @@ function SyncAlignment(NumberOfFiles)
 %
 % Version 1.0
 % V1.00 = Initial Release
-%
+% V1.01 = Corrected issue that would allow the function to read non-30k files.
 
 
 NSPInfo = {};
@@ -25,6 +25,10 @@ for i = 1 :NumberOfFiles
     end
     if length(NSPInfo{i}.MetaTags.Timestamp) > 1
         disp('This function does not deal with paused data or missing segments, please contact support')
+        return
+    end
+    if NSPInfo{i}.MetaTags.SamplingFreq ~= 30000
+        disp('This function requires inputs of 30k sampled data.')
         return
     end
 end
