@@ -1,9 +1,18 @@
-function CorrectDriftWithoutSignal (ForceHFMethod,ForceLFMethod,ForcePredictionMethod) 
-%% 
+function CorrectDriftWithoutSignal (Method) 
+%% Correct Drift Without Signal
+% This function attempts to align two data files that have clock drift
+% between the two. It attempts to determine the amount of clock drift by
+% looking for cross correlations between various filtered versions of the
+% signal between the two devices. If it fails to find a cross correlation
+% that it feels confident in, it attempts to predict the clock drift based
+% on emperical data for similar devices. 
 % 
-% 
-% 
-% 
+% Method:
+% 0 = Script Chooses Best Method
+% 1 = Force High Frequency Method
+% 2 = Force Low Frequency Method
+% 3 = Force Prediction Method
+%
 % Version 1.5
 % - Corrected an issue with prediction method that would cause it %to not work with data that didn't contain cells.
 %
@@ -16,30 +25,75 @@ function CorrectDriftWithoutSignal (ForceHFMethod,ForceLFMethod,ForcePredictionM
 % Version 1.7
 % - Added modifications to process the files in pieces and therefore reduce
 % RAM.
-Version = '1.7';
+%
+% Version 1.8
+% - Removed the need for files to be processed in thirds.
+% - Made the cross correlation measurements use a larger amount of data
+% (300000 samples).
+% - Made so that the lag calculations use averaged data.
+% - Calculate lag at more points in the file and take a regression as the
+% final lag calculation.
+%
+%
+%
 
-TestMethod = 1; %Flag to set for faster processing method
+Version = '1.8';
 
-NumberOfFiles = 2; %Has to stay 2 for now
+TestMethod = 1; %Flag to set for faster processing method (basically now used as default method).
+NumberOfFiles = 2; %Has to stay 2 for now as this script only operates on file pairs.
+DivideIntoThirds = 0; % Allows dividing the file into thirds. Currently not functional.
 
-Method = 0; %This is a flag that will be set when a certain method of alignment should be used.
+
+%% Select files to be drift corrected
 
 uiwait(msgbox('Please select the files to align. One at a time.','Info','modal'));
 
+% The NSP structure is repeatedly reused for containing either headers or
+% actual full data structures. It isn't used in this block, but it is
+% created here just to show its importance.
 NSP = {};
+
 for i = 1:NumberOfFiles   
-    if i == SelectUpsampleNSP
-        uiwait(msgbox('This NSP should be the 1.5. This one will be upsampled.','Info','modal'));
-    end
+    
+    % This should no longer be required. Upsampled NSP is not selectable
+    % anymore as the upsampled NSP is determined automatically in the
+    % prediction method. (Upsampled NSP is otherwise determined by the lag
+    % time in the xcorr calculation). Will remove this commented out line
+    % in a future revision. 
+%     if i == SelectUpsampleNSP
+%         uiwait(msgbox('This NSP should be the 1.5. This one will be upsampled.','Info','modal'));
+%     end
+    
+    % Open the file header without loading data. This lets us check the
+    % sampling frequency and number (and identity) of channels in the file. 
     TempMetaData = openNSx('noread');
+    
+    %Require a 30k sampling for all files. 
     if TempMetaData.MetaTags.SamplingFreq ~= 30000
         disp('Signal is required to sampled at 30kHz. Please try again.')
         return
     end
-    %Choosing a random channel
-    Channel{i} = num2str(floor(rand*length(find([TempMetaData.ElectrodesInfo.ElectrodeID]<128)))+1);
+    
+    % Choose a random channel and use the next 5 channels. If there are
+    % less than 5, then use all channels for the mean, but notify the user.
+    % These channels are used to calculate the cross correlation to look
+    % for high frequency events that are common to both. There is a channel
+    % vector created per file loaded (NumberOfFiles)
+    ChosenChannel = floor(rand*length(find([TempMetaData.ElectrodesInfo.ElectrodeID]<128)))+1;
+    if length(find([TempMetaData.ElectrodesInfo.ElectrodeID]<128))>ChosenChannel+5
+        Channel{i} = ChosenChannel:ChosenChannel+5;
+    elseif length(find([TempMetaData.ElectrodesInfo.ElectrodeID]<128))>5
+        Channel{i} = 1:5;
+    else
+        disp('Too few channels to take a 5 Channel mean signal. Using all channels.');
+        Channel{i} = 1:length(find([TempMetaData.ElectrodesInfo.ElectrodeID]<128));
+    end
+    % Full filename used for openNSx later.
     Filename{i} = fullfile(TempMetaData.MetaTags.FilePath,[TempMetaData.MetaTags.Filename TempMetaData.MetaTags.FileExt]);
+    clear ChosenChannel
 end
+
+%% Create a text based report of the results. Record version number. 
 
 ReportFID = fopen(strcat(TempMetaData.MetaTags.FilePath,'/',TempMetaData.MetaTags.Filename,'-report.txt'),'w','n','Shift_JIS');
 fprintf(ReportFID,'Report from RomanCorrection Script');
@@ -48,22 +102,37 @@ fprintf(ReportFID,'Version:');
 fprintf(ReportFID,Version);
 fprintf(ReportFID,'\n');
 
+clear TempMetaData
+
+%% Based on files selected above, open the channel subset for analysis
+
+% Open NSx with channel parameter passed to open just five channels. Since
+% they are consecutive, should only use five channels worth of memory for
+% each entry in the NSP cell structure
 for i = 1:NumberOfFiles
-    NSP{i} = openNSx(Filename{i},strcat('c:',Channel{i},':',Channel{i}));
+    NSP{i} = openNSx(Filename{i},['c:' num2str(Channel{i}(1)) ':' num2str(Channel{i}(end))]);
 end
 
+% Save meta tags of original files into their own variable as the NSP
+% variable is used up repeatedly. 
 for i = 1:NumberOfFiles
     NSPMetaInfo{i} = openNSx(Filename{i},'noread');
 end
-% clear TempMetaData
+
 clear Channel
 
+%% Validate the data contents
+
+% This whole loops checks the data for file recording restarts, resync
+% events, and packet loss to make sure that it is operating on the right
+% set of data. 
 for i = 1:NumberOfFiles
     if iscell(NSP{i}.Data)
         disp('Cells in data');
-        Cell = 1;
-        SyncIndex(i) = FindReSync(NSP{i}.MetaTags);
+        Cell = 1; % Flag to show that data is cellular
+        SyncIndex(i) = FindReSync(NSP{i}.MetaTags); % External function finds clock resets. If it only finds one, it assumes that this is a resync event.
         if SyncIndex(i) == 0
+            disp('File may have packet loss. This version of the script does not currently work with packet loss.')
             return
         end
         if SyncIndex(i) < length(NSP{i}.Data)-1
@@ -71,662 +140,189 @@ for i = 1:NumberOfFiles
             return
         end
     else
+        % Function can work without cell data, but script must change some
+        % asssumptions to work this way. 
         disp('These files have single cell data.They may not have been from a synchronized recording, or they may have been processed by another tool.')
         Cell = 0;
     end
 end
 
+%% Test High Frequency Alignment Method
+% This method attempts to look for a common high frequency signal between
+% the files and use that signal to perform a cross correlation to determine
+% the lag amount between the two files at that point. It validates this
+% high frequency signal by looking for it in multiple places in the file
+% and also comparing it to the known offset between the files.
 
-%% Attempt to Look for a common High Frequency Signal
+% If no method is yet assigned or is the already assigned method, then this is considered a possible method and the data from this segment is gathered.  
+if Method == 0 || Method == 1
 
-%Create the high pass filter.
-[b,a] = butter(8,2000/30000,'high');
+    % Create the high pass filter used in this method.
+    [b,a] = butter(8,2000/30000,'high');
 
-%Filter the data and remove portions that are not needed
-for i = 1:NumberOfFiles
-    if Cell == 1
-        NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
-    else
-        NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
-    end
-end
-
-%Correct disparity between the files caused by resynchronization
-% for i = 1:NumberOfFiles
-%     NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp(SyncIndex)) NSP{i}.Data];
-% end
-
-%Perform Cross Correlation
-lagdiff = [];
-SamplingRate = 30000;
-[acor,lag] = xcorr(NSP{1}.Data(1:30000), NSP{2}.Data(1:30000));
-[~, I] = max(abs(acor));
-firstlagdiff = lag(I)
-% timediff = lagdiff/Fs
-
-for i = 1:NumberOfFiles
-    if Cell == 1;
-        DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
-    else
-        DataTimestamps(i) = NSP{i}.MetaTags.Timestamp;
-    end
-end
-
-% If the high frequency method correctly predicts that actual offset of the
-% files then we have a winner. Allow some jitter/leniency
-if abs(firstlagdiff) < (abs(max(DataTimestamps) - min(DataTimestamps))+10)
-    disp('High frequency component found. Proceding with High Frequency method.')
-    Method = 1;
-else
-    disp('No high frequency component. Moving to next method.')
-    Method = 0; %Remain the same
-end
-
-if ForceHFMethod == 1
-    Method = 1;
-end
-
-if ForceLFMethod == 1
-    Method = 0;
-end
-
-if ForcePredictionMethod == 1
-    Method = 0;
-end
-
-
-if Method == 1
-    fprintf(ReportFID,'Mode:');
-    fprintf(ReportFID,'High Frequency');
-    fprintf(ReportFID,'\n');
-    
+    % Filter the data and remove portions that are not needed (pre-sync
+    % periods)
     for i = 1:NumberOfFiles
-        DataLength(i) = length(NSP{i}.Data);
-    end
-    EndPoint = min(DataLength);
-    clear DataLength
-
-    %Perform Cross Correlation
-    lagdiff = [];
-    SamplingRate = 30000;
-    [acor,lag] = xcorr(NSP{1}.Data(EndPoint-30000:EndPoint), NSP{2}.Data(EndPoint-30000:EndPoint));
-    [~, I] = max(abs(acor));
-    plot(acor);
-    lagdiff = lag(I)
-    clear SamplingRate
-    clear acor
-    clear lag
-    clear I
-
-
-    %If Lag Amount is Negative, NSP1 Data needs to be resampled at a higher
-    %rate. If Positive, NSP2 needs to be resampled at a higher rate.
-    if (lagdiff < 0)
-        DataToResample = 1;
-    elseif (lagdiff > 0)
-        DataToResample = 2;
-    else
-        disp('Your drift amount appears to be 0; these data may be aligned. Please check manually')
-        DataToResample = 0;
-        return
-    end
-
-    disp('Calculations complete. Opening full data file for drift correction. This may take a long while.')
-    fprintf(ReportFID,'lagdiff:');
-    fprintf(ReportFID,num2str(lagdiff));
-    fprintf(ReportFID,'\n');
-    
-    for i = 1:NumberOfFiles
-        NSPThirds{i,1} = floor(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3);
-        NSPThirds{i,2} = floor(2*(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3));
-        NSPThirds{i,3} = length(NSPMetaInfo{i}.MetaTags.ChannelID);
-    end
-    
-    %Do once for each section of thirds created just above
-    for idx = 1:3
-        for i = 1:NumberOfFiles
-            switch(idx)
-                case 1;
-                    NSP{i} = openNSx(Filename{i},['c:' num2str(1) ':' num2str(NSPThirds{i,1})]);
-                    
-                case 2;
-                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,1}+1) ':' num2str(NSPThirds{i,2})]);
-                    
-                case 3;
-                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,2}+1) ':' num2str(NSPThirds{i,3})]);
-                    
-            end
-            if Cell == 1;     
-                NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
-                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
-            else
-
-            end
-        end
-        DriftAmount = abs(lagdiff - firstlagdiff)
-        fprintf(ReportFID,'Total Drift Amount:');
-        fprintf(ReportFID,num2str(DriftAmount));
-        fprintf(ReportFID,'\n');
-        OriginalLength = length(NSP{DataToResample}.Data);
-        ResamplePeriod = round(EndPoint/DriftAmount);
-    %     OriginalSamplingRate = 30000;
-    %     NewSamplingRate = 30000 + 30000/ResamplePeriod;
-    %     [p,q] = rat(NewSamplingRate/OriginalSamplingRate);
-    %     DataForResampling = resample(double(DataForResampling),p,q);
-        TotalPeriods = round(EndPoint/ResamplePeriod); %This is basically just equal to drift amount, but it looks nice
-
-        if TestMethod == 1
-            tic
-                RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
-                RepeatingArray(1:ResamplePeriod:end) = 2;
-                NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
-            toc
+        if Cell == 1
+            NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
         else
-            for period = 1:TotalPeriods
-                    tic
-                    NSP{DataToResample}.Data = [NSP{DataToResample}.Data(:,1:ResamplePeriod*period) NSP{DataToResample}.Data(:,ResamplePeriod*period:end)];
-                    disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                    t = toc;
-                    EstimatedTimeLeft = t*(TotalPeriods-period);
-                    disp(strcat('Estimated Time Left: ',num2str(EstimatedTimeLeft),' Seconds'))
-            end
+            NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
         end
-
-        %Correct disparity between the files caused by resynchronization
-        for i = 1:NumberOfFiles
-            NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
-        end
-
-        MethodComment = 'Sync Method: High Frequency Method';
-        NSP{1}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-        NSP{2}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-        saveNSxSync(NSP{1});
-        saveNSxSync(NSP{2});
-    
     end
-    
-    %Handle Additional File Types
+
+    % Reduce dimensionality and noise by averaging the matrix we just filtered.
     for i = 1:NumberOfFiles
-        ValidFileTypes = {};
-            for idx = 1:NumberOfFiles
-                FileExtTypes = {'.ns1' '.ns2' '.ns3' '.ns4' '.ns5' '.ns6'};
-                ValidTypesIndices = [];
-                for Type = 1:length(FileExtTypes)
-                    if ~strcmpi(FileExtTypes{Type},NSP{1}.MetaTags.FileExt)
-                        ValidTypesIndices = [ValidTypesIndices Type];
-                    end
-                end
-                ValidFileTypes{idx} = ValidTypesIndices;
-            end
-            
-            
-        for Type = ValidFileTypes{i}
-            TempFilename = fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename FileExtTypes{Type}]);
-            
-            if exist(TempFilename)
-                disp(strcat('Found:',TempFilename));
-                TempStructure = openNSx(TempFilename,'noread');
-                EndPacket = TempStructure.MetaTags.DataPoints;
-                TimestampScale = 30000/TempStructure.MetaTags.SamplingFreq;
-                
-                
-
-                    for ixxy = 1:3
-                        NSPThirds(1) = floor(length(TempStructure.MetaTags.ChannelID)/3);
-                        NSPThirds(2) = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
-                        NSPThirds(3) = length(TempStructure.MetaTags.ChannelID);
-
-
-
-                        switch(idx)
-                            case 1;
-                                NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds(1))]);
-                                
-                            case 2;
-                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(1)+1) ':' num2str(NSPThirds(2))]);
-                               
-                            case 3;
-                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(2)+1) ':' num2str(NSPThirds(3))]);
-                                
-                        end
-
-                        %NSx = openNSx(TempFilename);
-                        if DataToResample == i
-                            if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
-                                %disp('This function does not work on paused data currently');
-
-                                NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
-                                NSx.MetaTags.Timestamp = 0;
-                                TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                                TempEndPoint = round(EndPoint/TimestampScale);
-                                TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                                if TestMethod == 1
-                                    tic
-                                    RepeatingArray = ones(1,length(NSx.Data));
-                                    RepeatingArray(1:TempResamplePeriod:end) = 2;
-                                    NSx.Data = repelem(NSx.Data,1,RepeatingArray);
-                                    toc
-                                else
-                                    if TotalPeriods > 1
-                                        for period = 1:TotalPeriods
-                                            NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                            disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                                        end
-                                    end
-                                end
-
-                            elseif not(iscell(NSx.Data))
-                                NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
-                                TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                                TempEndPoint = round(EndPoint/TimestampScale);
-                                TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                                if TotalPeriods > 1
-                                    for period = 1:TotalPeriods
-                                        NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                        disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                                    end
-                                end
-                            end
-                        end
-
-
-                        saveNSxSync(NSx);
-                    end
-                
-            end
-        end
-        
-        
-        %NEV Attempt
-        if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
-            TempNEV = openNEV(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev']),'nosave','nomat');
-            disp(strcat('Found:',fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])));
-            %Serial Digital IO
-            for timestamp = 1:length(TempNEV.Data.SerialDigitalIO.TimeStamp)
-                TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp) = TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp)+round(TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Spikes
-            for timestamp = 1:length(TempNEV.Data.Spikes.TimeStamp)
-                TempNEV.Data.Spikes.TimeStamp(timestamp) = TempNEV.Data.Spikes.TimeStamp(timestamp)+round(TempNEV.Data.Spikes.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Comments
-            for timestamp = 1:length(TempNEV.Data.Comments.TimeStamp)
-                TempNEV.Data.Comments.TimeStamp(timestamp) = TempNEV.Data.Comments.TimeStamp(timestamp)+round(TempNEV.Data.Comments.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Video Sync
-            for timestamp = 1:length(TempNEV.Data.VideoSync.TimeStamp)
-                TempNEV.Data.VideoSync.TimeStamp(timestamp) = TempNEV.Data.VideoSync.TimeStamp(timestamp)+round(TempNEV.Data.VideoSync.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Tracking Events
-            for timestamp = 1:length(TempNEV.Data.TrackingEvents.TimeStamp)
-                TempNEV.Data.TrackingEvents.TimeStamp(timestamp) = TempNEV.Data.TrackingEvents.TimeStamp(timestamp)+round(TempNEV.Data.TrackingEvents.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Patient Trigger
-            for timestamp = 1:length(TempNEV.Data.PatientTrigger.TimeStamp)
-                TempNEV.Data.PatientTrigger.TimeStamp(timestamp) = TempNEV.Data.PatientTrigger.TimeStamp(timestamp)+round(TempNEV.Data.PatientTrigger.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Reconfig
-            for timestamp = 1:length(TempNEV.Data.Reconfig.TimeStamp)
-                TempNEV.Data.Reconfig.TimeStamp(timestamp) = TempNEV.Data.Reconfig.TimeStamp(timestamp)+round(TempNEV.Data.Reconfig.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            
-            if ~isempty(TempNEV.Data.Tracking)
-                uiwait(msgbox('This version does not operate on tracking data timestamps. Please contact Blackrock Support.','ERROR','modal'));
-            end
-
-            
-            saveNEVSync(TempNEV);
+        if size(NSP{i}.Data,2) > 1
+            NSP{i}.Data = mean(NSP{i}.Data');
         end
     end
-    
-    
-    fclose(ReportFID);
-    return
-else
-    %disp('No high frequency component moving on to low frequency method.')
-end 
 
-%% Attempt to look for common low frequency signal
-
-%Create the low pass filter.
-[b,a] = butter(8,200/30000,'low');
-
-%Filter the data and remove portions that are not needed
-for i = 1:NumberOfFiles
-    if Cell == 1
-        NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
-    else
-        NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
-    end
-end
-
-%Perform Cross Correlation
-lagdiff = [];
-SamplingRate = 30000;
-[acor,lag] = xcorr(NSP{1}.Data(1:30000), NSP{2}.Data(1:30000));
-[~, I] = max(abs(acor));
-firstlagdiff = lag(I)
-
-for i = 1:NumberOfFiles
-    if Cell == 1;
-        DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
-    else
-        DataTimestamps(i) = NSP{i}.MetaTags.Timestamp;
-    end
-end
-
-% If this method correctly predicts that actual offset of the
-% files then we have a winner
-if abs(firstlagdiff) < (abs(max(DataTimestamps) - min(DataTimestamps))+10)
-    disp('Low frequency component found.')
-    Method = 1;
-else
-    disp('No Low frequency component. Moving to next method.')
-    Method = 0;
-end
-
-if ForceLFMethod == 1
-    Method = 1;
-end
-
-if ForcePredictionMethod == 1
-    Method = 0;
-    disp('Prediction Method Forced. Moving to Prediction Method.');
-end
-
-
-if Method == 1
-    fprintf(ReportFID,'Mode:');
-    fprintf(ReportFID,'Low Frequency');
-    fprintf(ReportFID,'\n');
+    % Find the shortest file time (can't compare files outside of that range)
     for i = 1:NumberOfFiles
         DataLength(i) = length(NSP{i}.Data);
     end
     EndPoint = min(DataLength);
     clear DataLength
 
-    %Perform Cross Correlation
-    lagdiff = [];
-    SamplingRate = 30000;
-    [acor,lag] = xcorr(NSP{1}.Data(EndPoint-30000:EndPoint), NSP{2}.Data(EndPoint-30000:EndPoint));
+    % Perform Cross Correlation
+    SamplingRate = 30000; % Ensured 30k compliance earlier.
+    [acor,lag] = xcorr(NSP{1}.Data(1:300000), NSP{2}.Data(1:300000));
     [~, I] = max(abs(acor));
-    plot(acor);
-    lagdiff = lag(I)
-    clear SamplingRate
-    clear acor
-    clear lag
-    clear I
-  
+    firstlagdiff = lag(I); % Number of samples difference at this stage in the file. This is used for validation of our method by comparing it to timestamp offset.
 
-    %If Lag Amount is Negative, NSP1 Data needs to be resampled at a higher
-    %rate. If Positive, NSP2 needs to be resampled at a higher rate.
-    if (lagdiff < 0)
-        DataToResample = 1;
-    elseif (lagdiff > 0)
-        DataToResample = 2;
-    else
-        disp('Your drift amount appears to be 0; these data may be aligned. Please check manually')
-        DataToResample = 0;
-        return
+    for i = 1:NumberOfFiles
+        if Cell == 1;
+            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i)); %Get timestamp value of our data cell
+        else
+            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp; % If no cell, then only single timestamp value exists
+        end
     end
-    
-    
-    disp('Calculations complete. Opening full data file for drift correction. This may take a long while.')
-    fprintf(ReportFID,'lagdiff:');
-    fprintf(ReportFID,num2str(lagdiff));
-    fprintf(ReportFID,'\n');
-    
+
+    % Attempt to split file into thirds to save on RAM. These numbers
+    % represent Channels to select when opening the files in the future. These
+    % may not be used if the flag for passing the option to separate these into
+    % thirds is not used. 
     for i = 1:NumberOfFiles
         NSPThirds{i,1} = floor(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3);
         NSPThirds{i,2} = floor(2*(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3));
         NSPThirds{i,3} = length(NSPMetaInfo{i}.MetaTags.ChannelID);
     end
-    
-    %Do once for each section of thirds created just above
-    for idx = 1:3
-        for i = 1:NumberOfFiles
-            switch(idx)
-                case 1;
-                    NSP{i} = openNSx(Filename{i},['c:' num2str(1) ':' num2str(NSPThirds{i,1})]);
-                    
-                case 2;
-                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,1}+1) ':' num2str(NSPThirds{i,2})]);
-                    
-                case 3;
-                    NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,2}+1) ':' num2str(NSPThirds{i,3})]);   
-            end
-            if Cell == 1;     
-                NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
-                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
-            else
-
-            end
-        end
-        DriftAmount = abs(lagdiff - firstlagdiff);
-        fprintf(ReportFID,'Drift Amount:');
-        fprintf(ReportFID,num2str(DriftAmount));
-        fprintf(ReportFID,'\n');
-        OriginalLength = length(NSP{DataToResample}.Data);
-        ResamplePeriod = round(EndPoint/DriftAmount);
-        % Our frequency adjustments are too small for the Matlab resampling to
-        % handle
-    %     OriginalSamplingRate = 30000;
-    %     NewSamplingRate = 30000 + 30000/ResamplePeriod;
-    %     [p,q] = rat(NewSamplingRate/OriginalSamplingRate);
-    %     DataForResampling = resample(double(DataForResampling),p,q);
-        TotalPeriods = round(EndPoint/ResamplePeriod); %This is basically just equal to drift amount, but it looks nice
 
 
-       if TestMethod == 1
-            tic
-                RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
-                RepeatingArray(1:ResamplePeriod:end) = 2;
-                NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
-            toc
-       else
-            for period = 1:TotalPeriods
-                tic
-                NSP{DataToResample}.Data = [NSP{DataToResample}.Data(:,1:ResamplePeriod*period) NSP{DataToResample}.Data(:,ResamplePeriod*period:end)];
-                disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                t = toc;
-                EstimatedTimeLeft = t*(TotalPeriods-period);
-                disp(strcat('Estimated Time Left: ',num2str(EstimatedTimeLeft),' Seconds'))
-            end
-       end
-
-
-        %Correct disparity between the files caused by resynchronization
-        for i = 1:NumberOfFiles
-            NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
-        end
-
-        MethodComment = 'Sync Method: Low Frequency Method';
-        NSP{1}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-        NSP{2}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-
-        saveNSxSync(NSP{1});
-        saveNSxSync(NSP{2});
-    end
-    
-    %Handle Additional File Types
-    for i = 1:NumberOfFiles
-        ValidFileTypes = {};
-            for idx = 1:NumberOfFiles
-                FileExtTypes = {'.ns1' '.ns2' '.ns3' '.ns4' '.ns5' '.ns6'};
-                ValidTypesIndices = [];
-                for Type = 1:length(FileExtTypes)
-                    if ~strcmpi(FileExtTypes{Type},NSP{1}.MetaTags.FileExt)
-                        ValidTypesIndices = [ValidTypesIndices Type];
-                    end
-                end
-                ValidFileTypes{idx} = ValidTypesIndices;
-            end
-            
-            
-        for Type = ValidFileTypes{i}
-            TempFilename = fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename FileExtTypes{Type}]);
-            if exist(TempFilename)
-                disp(strcat('Found:',TempFilename));
-                TempStructure = openNSx(TempFilename,'noread');
-                EndPacket = TempStructure.MetaTags.DataPoints;
-                TimestampScale = 30000/TempStructure.MetaTags.SamplingFreq;
-                
-                 for ixxy = 1:3
-                            NSPThirds(1) = floor(length(TempStructure.MetaTags.ChannelID)/3);
-                            NSPThirds(2) = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
-                            NSPThirds(3) = length(TempStructure.MetaTags.ChannelID);
-
-
-
-                            switch(idx)
-                                case 1;
-                                    NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds(1))]);
-
-                                case 2;
-                                    NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(1)+1) ':' num2str(NSPThirds(2))]);
-
-                                case 3;
-                                    NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(2)+1) ':' num2str(NSPThirds(3))]);
-
-                            end
-
-
-                    %NSx = openNSx(TempFilename);
-                    if DataToResample == i
-                        if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
-                            %disp('This function does not work on paused data currently');
-
-                            NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
-                            NSx.MetaTags.Timestamp = 0;
-                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                            TempEndPoint = round(EndPoint/TimestampScale);
-                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                            if TestMethod == 1
-                                tic
-                                RepeatingArray = ones(1,length(NSx.Data));
-                                RepeatingArray(1:TempResamplePeriod:end) = 2;
-                                NSx.Data = repelem(NSx.Data,1,RepeatingArray);
-                                toc
-                            else
-                                if TotalPeriods > 1
-                                    for period = 1:TotalPeriods
-                                        NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                        disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                                    end
-                                end
-                            end
-
-                        elseif not(iscell(NSx.Data))
-                            NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
-                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                            TempEndPoint = round(EndPoint/TimestampScale);
-                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                            if TotalPeriods > 1
-                                for period = 1:TotalPeriods
-                                    NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                    disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                                end
-                            end
-                        end
-                    end
-
-
-                    saveNSxSync(NSx)
-                 end
-            end
-        end
-        
-        
-        %NEV Attempt
-        if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
-            TempNEV = openNEV(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev']),'nosave','nomat');
-            disp(strcat('Found:',fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])));
-            %Serial Digital IO
-            for timestamp = 1:length(TempNEV.Data.SerialDigitalIO.TimeStamp)
-                TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp) = TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp)+round(TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Spikes
-            for timestamp = 1:length(TempNEV.Data.Spikes.TimeStamp)
-                TempNEV.Data.Spikes.TimeStamp(timestamp) = TempNEV.Data.Spikes.TimeStamp(timestamp)+round(TempNEV.Data.Spikes.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Comments
-            for timestamp = 1:length(TempNEV.Data.Comments.TimeStamp)
-                TempNEV.Data.Comments.TimeStamp(timestamp) = TempNEV.Data.Comments.TimeStamp(timestamp)+round(TempNEV.Data.Comments.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Video Sync
-            for timestamp = 1:length(TempNEV.Data.VideoSync.TimeStamp)
-                TempNEV.Data.VideoSync.TimeStamp(timestamp) = TempNEV.Data.VideoSync.TimeStamp(timestamp)+round(TempNEV.Data.VideoSync.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Tracking Events
-            for timestamp = 1:length(TempNEV.Data.TrackingEvents.TimeStamp)
-                TempNEV.Data.TrackingEvents.TimeStamp(timestamp) = TempNEV.Data.TrackingEvents.TimeStamp(timestamp)+round(TempNEV.Data.TrackingEvents.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Patient Trigger
-            for timestamp = 1:length(TempNEV.Data.PatientTrigger.TimeStamp)
-                TempNEV.Data.PatientTrigger.TimeStamp(timestamp) = TempNEV.Data.PatientTrigger.TimeStamp(timestamp)+round(TempNEV.Data.PatientTrigger.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Reconfig
-            for timestamp = 1:length(TempNEV.Data.Reconfig.TimeStamp)
-                TempNEV.Data.Reconfig.TimeStamp(timestamp) = TempNEV.Data.Reconfig.TimeStamp(timestamp)+round(TempNEV.Data.Reconfig.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            
-            if ~isempty(TempNEV.Data.Tracking)
-                uiwait(msgbox('This version does not operate on tracking data timestamps. Please contact Blackrock Support.','ERROR','modal'));
-            end
-
-            
-            saveNEVSync(TempNEV)
-        end
-    end
-    
-    
-    fclose(ReportFID);
-    return
-else
-    %disp('No low frequency component moving on to prediction method.')
-end 
-
-
-%% Complete Prediction Method
-
-fprintf(ReportFID,'Mode:');
-fprintf(ReportFID,'Prediction');
-fprintf(ReportFID,'\n');
-
-for i = 1:NumberOfFiles
-    if Cell == 1
-        DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+    % If the high frequency method correctly predicts that actual offset of the
+    % files then we have a winner. Allow some jitter/leniency.
+    if abs(firstlagdiff) < (abs(max(DataTimestamps) - min(DataTimestamps))+10)
+        disp('High frequency component found. Proceding with High Frequency method.')
+        Method = 1; % 1==HighFrequencyMethod Later
+        ModeComment = 'High Frequency';
     else
-        DataTimestamps(i) = NSP{i}.MetaTags.Timestamp;
+        disp('No high frequency component. Moving to test next method.')
+        Method = 0; %Remain the same
     end
+
 end
 
-%Force method to 1 because this is the last option
-Method = 1;
+
+%% Test Low Frequency Alignment Method
+% This method attempts to look for a common low frequency signal between
+% the files and use that signal to perform a cross correlation to determine
+% the lag amount between the two files at that point. It validates this
+% low frequency signal by comparing it to the known offset between the
+% files.
+
+% If no method is yet assigned or is the already assigned method, then this is considered a possible method and the data from this segment is gathered.  
+if Method == 0 || Method == 2
+
+    % Create the high pass filter used in this method.
+    [b,a] = butter(8,200/30000,'low');
+
+    % Filter the data and remove portions that are not needed (pre-sync
+    % periods)
+    for i = 1:NumberOfFiles
+        if Cell == 1
+            NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
+        else
+            NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
+        end
+    end
+
+    % Reduce dimensionality and noise by averaging the matrix we just filtered.
+    for i = 1:NumberOfFiles
+        if size(NSP{i}.Data,1) > 1
+            NSP{i}.Data = mean(NSP{i}.Data');
+        end
+    end
+
+    % Find the shortest file time (can't compare files outside of that range)
+    for i = 1:NumberOfFiles
+        DataLength(i) = length(NSP{i}.Data);
+    end
+    EndPoint = min(DataLength);
+    clear DataLength
+
+    % Perform Cross Correlation
+    SamplingRate = 30000; % Ensured 30k compliance earlier.
+    [acor,lag] = xcorr(NSP{1}.Data(1:300000), NSP{2}.Data(1:300000));
+    [~, I] = max(abs(acor));
+    firstlagdiff = lag(I); % Number of samples difference at this stage in the file. This is used for validation of our method by comparing it to timestamp offset.
+
+    for i = 1:NumberOfFiles
+        if Cell == 1;
+            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i)); %Get timestamp value of our data cell
+        else
+            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp; % If no cell, then only single timestamp value exists
+        end
+    end
+
+    % Attempt to split file into thirds to save on RAM. These numbers
+    % represent Channels to select when opening the files in the future. These
+    % may not be used if the flag for passing the option to separate these into
+    % thirds is not used. 
+    for i = 1:NumberOfFiles
+        NSPThirds{i,1} = floor(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3);
+        NSPThirds{i,2} = floor(2*(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3));
+        NSPThirds{i,3} = length(NSPMetaInfo{i}.MetaTags.ChannelID);
+    end
 
 
+    % If the low frequency method correctly predicts that actual offset of the
+    % files then we have a winner. Allow some jitter/leniency.
+    if abs(firstlagdiff) < (abs(max(DataTimestamps) - min(DataTimestamps))+10)
+        disp('Low frequency component found. Proceding with Low Frequency method.')
+        Method = 2; % 2==LowFrequencyMethod Later
+        ModeComment = 'Low Frequency';
+    else
+        disp('No low frequency component. Moving to test next method.')
+        Method = 0; %Remain the same
+    end
 
-if Method == 1 
+end
+
+
+%% Test Prediction Alignment Method
+% This method uses empirical data for similar devices to determine what the
+% amount of offset should be over a given time period. 
+
+% If no method is yet assigned or is the already assigned method, then this is considered a possible method and the data from this segment is gathered.  
+if Method == 0 || Method == 3
+    
+    % Find the shortest file time (can't compare files outside of that range)
     for i = 1:NumberOfFiles
         DataLength(i) = length(NSP{i}.Data);
     end
     EndPoint = min(DataLength);
     clear DataLength
     
-    
+    % This will be used to determine the number of analog inputs in each
+    % file. This is used to determine which device is the one that needs to
+    % be upsampled according to empircal data.
     AnalogInputCounts = [];
     for i = 1:NumberOfFiles
         AnalogInputCounts(i) = length(find([NSP{i}.ElectrodesInfo.ElectrodeID]>128));
     end
-    
+
     %Check for event codes in digital inputs of NEV file. This will replace
     %the section below
-    for i = 1:NumberOfFiles
-        if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
-
-        end
-    end
-    
     DataToResample = [];
      for i = 1:NumberOfFiles
          if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
@@ -742,153 +338,320 @@ if Method == 1
              end
          end 
      end
-      DataToResample = 1;
-      
-  
-    
+     
+     if isempty(DataToResample)
+         disp('No digital events found (or no NEV files found), so script cannot determine upsample NSP using prediction method.')
+         disp('Hard code which NSP should be chosen by editing this value below, or make sure that the NEV files are visible to the script.')
+         DataToResample = 2;
+         %return
+     end
+     
+    % Filter the data and remove portions that are not needed (pre-sync
+    % periods)
+    for i = 1:NumberOfFiles
+        if Cell == 1
+            NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
+        else
+            NSP{i}.Data = NSP{i}.Data;
+        end
+    end
+
+    % Reduce dimensionality and noise by averaging the matrix we just filtered.
+    for i = 1:NumberOfFiles
+        if size(NSP{i}.Data,1) > 1
+            NSP{i}.Data = mean(NSP{i}.Data);
+        end
+    end
+
+    % Perform Cross Correlation
+    SamplingRate = 30000; % Ensured 30k compliance earlier.
+    [acor,lag] = xcorr(NSP{1}.Data(1:300000), NSP{2}.Data(1:300000));
+    [~, I] = max(abs(acor));
+    firstlagdiff = lag(I); % Number of samples difference at this stage in the file. This is used for validation of our method by comparing it to timestamp offset.
+
+    for i = 1:NumberOfFiles
+        if Cell == 1;
+            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i)); %Get timestamp value of our data cell
+        else
+            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp; % If no cell, then only single timestamp value exists
+        end
+    end
+
+    % Attempt to split file into thirds to save on RAM. These numbers
+    % represent Channels to select when opening the files in the future. These
+    % may not be used if the flag for passing the option to separate these into
+    % thirds is not used. 
     for i = 1:NumberOfFiles
         NSPThirds{i,1} = floor(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3);
         NSPThirds{i,2} = floor(2*(length(NSPMetaInfo{i}.MetaTags.ChannelID)/3));
         NSPThirds{i,3} = length(NSPMetaInfo{i}.MetaTags.ChannelID);
     end
-    
-    %Do once for each section of thirds created just above
-    for idx = 1:3
 
-        for i = 1:NumberOfFiles
-            disp('Calculations complete. Opening full data file for drift correction. This may take a long while.')
+
+    % Since this is the last option. Force prediction method.
+    disp('No frequency component found. Proceding with Prediction method.')
+    Method = 3; % 3==LowFrequencyMethod Later
+    ModeComment = 'Prediction Method';
+
+end
+
+
+%% Apply the Given Method
+
+% Add method information to the report
+fprintf(ReportFID,'Mode:');
+fprintf(ReportFID,ModeComment);
+fprintf(ReportFID,'\n');
+
+% Perform Cross Correlation at various points in the file as a way of
+% validating the signal 
+lagdiff = [];% Used to store the lag of the file near the endpoint. Difference between this and first lagdiff is total drift up to that point in the file.
+NumberOfLagPoints = 20;
+for i = 1:NumberOfLagPoints
+    if i == NumberOfLagPoints
+        [acor,lag] = xcorr(NSP{1}.Data(EndPoint-300000:EndPoint), NSP{2}.Data(EndPoint-300000:EndPoint));
+    else
+        LagSamplePoint = round(EndPoint/(NumberOfLagPoints-i));
+        if LagSamplePoint < 300000
+            [acor,lag] = xcorr(NSP{1}.Data(1:LagSamplePoint), NSP{2}.Data(1:LagSamplePoint));
+        else
+            [acor,lag] = xcorr(NSP{1}.Data(LagSamplePoint-300000:LagSamplePoint), NSP{2}.Data(LagSamplePoint-300000:LagSamplePoint));
+        end
+    end
+    [~, I] = max(abs(acor));
+    plot(acor);
+    lagdiff(i) = lag(I);
+end
+clear LagSamplePoint
+clear SamplingRate
+clear acor
+clear lag
+clear I
+
+
+lm = fitlm([1:length(lagdiff)],lagdiff);
+Intercept = lm.Coefficients{1,1};
+Coefficient = lm.Coefficients{2,1};
+EndLag = round(Intercept+Coefficient*NumberOfLagPoints);
+LagDifferenceCalculation = abs(lagdiff(NumberOfLagPoints)-EndLag);
+
+fprintf(ReportFID,'Intercept: ');
+fprintf(ReportFID,num2str(Intercept));
+fprintf(ReportFID,'\n');
+
+fprintf(ReportFID,'Coefficient: ');
+fprintf(ReportFID,num2str(Coefficient));
+fprintf(ReportFID,'\n');
+
+fprintf(ReportFID,'R Squared: ');
+fprintf(ReportFID,num2str(lm.Rsquared.Ordinary));
+fprintf(ReportFID,'\n');
+
+
+% If Lag Amount is Negative, NSP1 Data needs to be resampled at a higher
+% rate. If Positive, NSP2 needs to be resampled at a higher rate.
+if Method == 3
+    %Data to Resample is already set.
+else
+    if (lagdiff(1) < 0)
+        DataToResample = 1;
+    elseif (lagdiff(1) > 0)
+        DataToResample = 2;
+    else
+        disp('Your drift amount appears to be 0; these data may be aligned. Please check manually')
+        return
+    end
+end
+
+% Original length is/was used as a check to see that our total data
+% length had increased by the expected amount as a crude way of
+% checking if resampling had been properly aplied. 
+OriginalLength = length(NSP{DataToResample}.Data);
+
+% Add to report the timing offset throughout the file.
+for i = 1:NumberOfLagPoints
+    fprintf(ReportFID,['lagdiff ' num2str(i) ': ']);
+    fprintf(ReportFID,num2str(lagdiff(i)));
+    fprintf(ReportFID,'\n');
+end
+
+% Total drift amount is one of the most useful values generated. It
+% is saved to the report here. 
+if Method == 3
+    DriftAmount = 100*(OriginalLength/(30000*60*5)); %We see around 100 samples loss every 5 minutes on most of these NSPs.
+else
+    DriftAmount = abs(EndLag - firstlagdiff);
+end
+fprintf(ReportFID,'Total Drift Amount:');
+fprintf(ReportFID,num2str(DriftAmount));
+fprintf(ReportFID,'\n');
+clear NumberOfLagPoints
+
+% Resample period tells us every how many samples a new sample
+% needs to be added. 
+ResamplePeriod = round(EndPoint/DriftAmount);
+
+% Begin to work on the data. 
+disp('Calculations complete. Opening full data file for drift correction. This may take a long while.')
+
+% Clear NSP structure since it will be redefined in the next functional
+% line. This is less time efficient, but seems to be more memory
+% efficient. It may be bad practice to reuse a variable in a very
+% different way, but since the NSP structure is a way to maintain
+% consistency in information type in this script, I did it.
+clear NSP
+
+% Do once for each file to resample the original 30k data. This will
+% involve opening the whole file so could be very RAM intensive. 
+for i = 1:NumberOfFiles
+    if DivideIntoThirds == 1
+        for idx = 1:3
             switch(idx)
                 case 1;
                     NSP{i} = openNSx(Filename{i},['c:' num2str(1) ':' num2str(NSPThirds{i,1})]);
-                    
+
                 case 2;
                     NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,1}+1) ':' num2str(NSPThirds{i,2})]);
-                    
+
                 case 3;
                     NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,2}+1) ':' num2str(NSPThirds{i,3})]);
-                    
-            end
-            if Cell == 1
-                NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
-                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
             end
         end
-
-        OriginalLength = length(NSP{DataToResample}.Data);
-        DriftAmount = 100*(OriginalLength/(30000*60*5)); %We see around 100 samples loss every 5 minutes on most of these NSPs.
-        fprintf(ReportFID,'Drift Amount:');
-        fprintf(ReportFID,num2str(DriftAmount));
-        fprintf(ReportFID,'\n');
-        ResamplePeriod = round(EndPoint/DriftAmount);
-
-        TotalPeriods = EndPoint/ResamplePeriod; %This is basically just equal to drift amount, but it looks nice
-
-        if TestMethod == 1
-            tic
-                RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
-                RepeatingArray(1:ResamplePeriod:end) = 2;
-                NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
-            toc
-        else
-            for period = 1:TotalPeriods
-                tic
-                NSP{DataToResample}.Data = [NSP{DataToResample}.Data(:,1:ResamplePeriod*period) NSP{DataToResample}.Data(:,ResamplePeriod*period:end)];
-                disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                t = toc;
-                EstimatedTimeLeft = t*(TotalPeriods-period);
-                disp(strcat('Estimated Time Left: ',num2str(EstimatedTimeLeft),' Seconds'))
-            end
-        end
-
-
-
-        %Correct disparity between the files caused by resynchronization
-        for i = 1:NumberOfFiles
-            NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
-        end
-
-        MethodComment = 'Sync Method: Prediction Method';
-        NSP{1}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-        NSP{2}.MetaTags.Comment(end-length(MethodComment)+1:end) = MethodComment;
-
-
-        saveNSxSync(NSP{1});
-        saveNSxSync(NSP{2});
+    else
+        NSP{i} = openNSx(Filename{i});
     end
     
-    %Handle Additional File Types
-    for i = 1:NumberOfFiles
-        ValidFileTypes = {};
-            for idx = 1:NumberOfFiles
-                FileExtTypes = {'.ns1' '.ns2' '.ns3' '.ns4' '.ns5' '.ns6'};
-                ValidTypesIndices = [];
-                for Type = 1:length(FileExtTypes)
-                    if ~strcmpi(FileExtTypes{Type},NSP{1}.MetaTags.FileExt)
-                        ValidTypesIndices = [ValidTypesIndices Type];
-                    end
+    % If data is cellular (has proper resync events), only a portion of it is needed. 
+    if Cell == 1;     
+        % Clean up the data and only keep the useful section.
+        NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
+        NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+    else
+        % No cells in data, so it can be used as is. 
+    end    
+    
+    TotalPeriods = round(EndPoint/ResamplePeriod); %This is equal to drift amount, but it makes the logic a little bit easier to follow for new people.
+
+    % This is where the actual resampling happens.
+    % This is the fastest and most efficient method I could
+    % find for repeating given elements of the array as a
+    % method of upsampling. 
+    if i == DataToResample
+        tic;
+        RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
+        RepeatingArray(1:ResamplePeriod:end) = 2;
+        NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
+        toc;
+    end
+    
+    % Correct disparity between the files caused by resynchronization.
+    % If we did this earlier, then the xcorr could have accidentally
+    % latched on to this manual offset, doing this now just reduces the
+    % risk of that happening and ensures we have the expected offset
+    % when validating this method. 
+    NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
+    NSP{i}.MetaTags.Timestamp = 0;
+    
+    % Save the files using the saveNSxSync function, which is like
+    % SaveNSx, but doesn't have user input prompts. 
+    saveNSxSync(NSP{i});
+
+    % It is about to be redefined again in the next iteration of the
+    % loop. If it is the last iteration, then we don't need it anymore!
+    clear NSP
+end
+
+clear NSPThirds
+
+%% Additional File Types
+% Handle Additional Continous File Types (This is how the loop
+% structure should be for above, but above the nesting is reversed for
+% some reason. Fixing that would allow one to toggle between splitting the file into thirds or
+% not...)
+for i = 1:NumberOfFiles
+
+    % Creates a matrix of file types and elminates ones that have
+    % already been used. 
+    ValidFileTypes = {};
+        for idx = 1:NumberOfFiles
+            FileExtTypes = {'.ns1' '.ns2' '.ns3' '.ns4' '.ns5' '.ns6'};
+            ValidTypesIndices = [];
+            for Type = 1:length(FileExtTypes)
+                if ~strcmpi(FileExtTypes{Type},NSPMetaInfo{i}.MetaTags.FileExt)
+                    ValidTypesIndices = [ValidTypesIndices Type];
                 end
-                ValidFileTypes{idx} = ValidTypesIndices;
             end
-            
-            
-        for Type = ValidFileTypes{i}
-            TempFilename = fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename FileExtTypes{Type}]);
-            if exist(TempFilename)
-                disp(strcat('Found:',TempFilename));
-                TempStructure = openNSx(TempFilename,'noread');
-                EndPacket = TempStructure.MetaTags.DataPoints;
-                TimestampScale = 30000/TempStructure.MetaTags.SamplingFreq;
+            ValidFileTypes{idx} = ValidTypesIndices;
+        end
 
-                 for ixxy = 1:3
-                        NSPThirds{1,1} = floor(length(TempStructure.MetaTags.ChannelID)/3);
-                        NSPThirds{1,2} = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
-                        NSPThirds{1,3} = length(TempStructure.MetaTags.ChannelID);
+    % For each available file type, it attempts to look for a file.
+    for Type = ValidFileTypes{i}
+        TempFilename = fullfile(NSPMetaInfo{i}.MetaTags.FilePath, [NSPMetaInfo{i}.MetaTags.Filename FileExtTypes{Type}]);
 
+        % If the file exists, it is time to perform the exact same
+        % things that we did above, but on the new file. 
+        if exist(TempFilename)
+            disp(strcat('Found:',TempFilename));
+            TempStructure = openNSx(TempFilename,'noread');
+            EndPacket = TempStructure.MetaTags.DataPoints;
+            TimestampScale = 30000/TempStructure.MetaTags.SamplingFreq; % Used to scale how many timestamps to insert (downsampled upsample value)
+            if DivideIntoThirds == 1
+                SubSectionRepeats = 3;
+            else
+                SubSectionRepeats = 1;
+            end
+            for ixxy = 1:SubSectionRepeats
+                NSPThirds(1) = floor(length(TempStructure.MetaTags.ChannelID)/3);
+                NSPThirds(2) = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
+                NSPThirds(3) = length(TempStructure.MetaTags.ChannelID);
+                if DivideIntoThirds == 1 % If divide into thirds, then ixxy will be 1:3 and this switch will hit each third, otherwise skip and just open the file. ixxy will be 1 and this loop will go once.
+                    switch(ixxy)
+                        case 1;
+                            NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds(1))]);
+                        case 2;
+                            NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(1)+1) ':' num2str(NSPThirds(2))]); 
+                        case 3;
+                            NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(2)+1) ':' num2str(NSPThirds(3))]); 
+                    end
+                else
+                    NSx = openNSx(TempFilename); 
+                end
 
-                        
-
-                        switch(idx)
-                            case 1;
-                                NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds{1,1})]);
-                                
-                            case 2;
-                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds{1,1}+1) ':' num2str(NSPThirds{1,2})]);
-                               
-                            case 3;
-                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds{1,2}+1) ':' num2str(NSPThirds{1,3})]);
-                                
-                        end
-                
-                    %NSx = openNSx(TempFilename);
-                    if DataToResample == i
-                        if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
-                            %disp('This function does not work on paused data currently');
-
-                            NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
-                            NSx.MetaTags.Timestamp = 0;
-                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                            TempEndPoint = round(EndPoint/TimestampScale);
-                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                            if TestMethod == 1
-                                tic
-                                RepeatingArray = ones(1,length(NSx.Data));
-                                RepeatingArray(1:TempResamplePeriod:end) = 2;
-                                NSx.Data = repelem(NSx.Data,1,RepeatingArray);
-                                toc
-                            else
-                                if TotalPeriods > 1
-                                    for period = 1:TotalPeriods
-                                        NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                        disp([num2str(period) 'of' num2str(TotalPeriods)]);
-                                    end
+                if DataToResample == i
+                    if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
+                        NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
+                        NSx.MetaTags.Timestamp = 0;
+                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                        TempEndPoint = round(EndPoint/TimestampScale);
+                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
+                        if TestMethod == 1
+                            tic
+                            RepeatingArray = ones(1,length(NSx.Data));
+                            RepeatingArray(1:TempResamplePeriod:end) = 2;
+                            NSx.Data = repelem(NSx.Data,1,RepeatingArray);
+                            toc
+                        else
+                            if TotalPeriods > 1
+                                for period = 1:TotalPeriods
+                                    NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
+                                    disp([num2str(period) 'of' num2str(TotalPeriods)]);
                                 end
                             end
+                        end
 
-                        elseif not(iscell(NSx.Data))
-                            NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
-                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                            TempEndPoint = round(EndPoint/TimestampScale);
-                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
+                    elseif not(iscell(NSx.Data))
+                        NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
+                        NSx.MetaTags.Timestamp = 0;
+                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                        TempEndPoint = round(EndPoint/TimestampScale);
+                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
+                        if TestMethod == 1
+                            tic
+                            RepeatingArray = ones(1,length(NSx.Data));
+                            RepeatingArray(1:TempResamplePeriod:end) = 2;
+                            NSx.Data = repelem(NSx.Data,1,RepeatingArray);
+                            toc
+                        else
                             if TotalPeriods > 1
                                 for period = 1:TotalPeriods
                                     NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
@@ -897,62 +660,69 @@ if Method == 1
                             end
                         end
                     end
-
-
-                    saveNSxSync(NSx)
-                 end
+                end
+                saveNSxSync(NSx);
             end
-        end
-        
-        
-        %NEV Attempt
-        if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
-            TempNEV = openNEV(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev']),'nosave','nomat');
-            disp(strcat('Found:',fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])));
-            %Serial Digital IO
-            for timestamp = 1:length(TempNEV.Data.SerialDigitalIO.TimeStamp)
-                TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp) = TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp)+round(TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Spikes
-            for timestamp = 1:length(TempNEV.Data.Spikes.TimeStamp)
-                TempNEV.Data.Spikes.TimeStamp(timestamp) = TempNEV.Data.Spikes.TimeStamp(timestamp)+round(TempNEV.Data.Spikes.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Comments
-            for timestamp = 1:length(TempNEV.Data.Comments.TimeStamp)
-                TempNEV.Data.Comments.TimeStamp(timestamp) = TempNEV.Data.Comments.TimeStamp(timestamp)+round(TempNEV.Data.Comments.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Video Sync
-            for timestamp = 1:length(TempNEV.Data.VideoSync.TimeStamp)
-                TempNEV.Data.VideoSync.TimeStamp(timestamp) = TempNEV.Data.VideoSync.TimeStamp(timestamp)+round(TempNEV.Data.VideoSync.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Tracking Events
-            for timestamp = 1:length(TempNEV.Data.TrackingEvents.TimeStamp)
-                TempNEV.Data.TrackingEvents.TimeStamp(timestamp) = TempNEV.Data.TrackingEvents.TimeStamp(timestamp)+round(TempNEV.Data.TrackingEvents.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Patient Trigger
-            for timestamp = 1:length(TempNEV.Data.PatientTrigger.TimeStamp)
-                TempNEV.Data.PatientTrigger.TimeStamp(timestamp) = TempNEV.Data.PatientTrigger.TimeStamp(timestamp)+round(TempNEV.Data.PatientTrigger.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            %Reconfig
-            for timestamp = 1:length(TempNEV.Data.Reconfig.TimeStamp)
-                TempNEV.Data.Reconfig.TimeStamp(timestamp) = TempNEV.Data.Reconfig.TimeStamp(timestamp)+round(TempNEV.Data.Reconfig.TimeStamp(timestamp)/ResamplePeriod);
-            end
-            
-            if ~isempty(TempNEV.Data.Tracking)
-                uiwait(msgbox('This version does not operate on tracking data timestamps. Please contact Blackrock Support.','ERROR','modal'));
-            end
-
-            
-            saveNEVSync(TempNEV)
         end
     end
-    
-    
-    fclose(ReportFID);
-    return
-else
-    disp('No other options. No Data was synced.')
-end 
+
+    % We are done with continuous data segments, so we can clear this
+    % variable to save on some memory.
+    clear NSx 
+
+%% Handle NEV Resampling
+
+    % This is still part of the 'for number of files' loop above, but
+    % it handles NEV instead of continuous data. The base method for
+    % this is to properly add values to each timestamp based on how far
+    % into the file it is. This means that we must iterate over each
+    % timestamp since each one will have a potentially different value
+    % added to it depending on its own value. Overall, though, the
+    % looping is pretty fast even for long files as they are 1D arrays
+    % and we are just doing addition. 
+    if (exist(fullfile(NSPMetaInfo{i}.MetaTags.FilePath, [NSPMetaInfo{i}.MetaTags.Filename '.nev'])))
+        TempNEV = openNEV(fullfile(NSPMetaInfo{i}.MetaTags.FilePath, [NSPMetaInfo{i}.MetaTags.Filename '.nev']),'nosave','nomat');
+        disp(strcat('Found:',fullfile(NSPMetaInfo{i}.MetaTags.FilePath, [NSPMetaInfo{i}.MetaTags.Filename '.nev'])));
+        %Serial Digital IO
+        for timestamp = 1:length(TempNEV.Data.SerialDigitalIO.TimeStamp)
+            TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp) = TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp)+round(TempNEV.Data.SerialDigitalIO.TimeStamp(timestamp)/ResamplePeriod);
+        end
+        %Spikes
+        for timestamp = 1:length(TempNEV.Data.Spikes.TimeStamp)
+            TempNEV.Data.Spikes.TimeStamp(timestamp) = TempNEV.Data.Spikes.TimeStamp(timestamp)+round(TempNEV.Data.Spikes.TimeStamp(timestamp)/ResamplePeriod);
+        end
+        %Comments
+        for timestamp = 1:length(TempNEV.Data.Comments.TimeStamp)
+            TempNEV.Data.Comments.TimeStamp(timestamp) = TempNEV.Data.Comments.TimeStamp(timestamp)+round(TempNEV.Data.Comments.TimeStamp(timestamp)/ResamplePeriod);
+        end
+        %Video Sync
+        for timestamp = 1:length(TempNEV.Data.VideoSync.TimeStamp)
+            TempNEV.Data.VideoSync.TimeStamp(timestamp) = TempNEV.Data.VideoSync.TimeStamp(timestamp)+round(TempNEV.Data.VideoSync.TimeStamp(timestamp)/ResamplePeriod);
+        end
+        %Tracking Events
+        for timestamp = 1:length(TempNEV.Data.TrackingEvents.TimeStamp)
+            TempNEV.Data.TrackingEvents.TimeStamp(timestamp) = TempNEV.Data.TrackingEvents.TimeStamp(timestamp)+round(TempNEV.Data.TrackingEvents.TimeStamp(timestamp)/ResamplePeriod);
+        end
+        %Patient Trigger
+        for timestamp = 1:length(TempNEV.Data.PatientTrigger.TimeStamp)
+            TempNEV.Data.PatientTrigger.TimeStamp(timestamp) = TempNEV.Data.PatientTrigger.TimeStamp(timestamp)+round(TempNEV.Data.PatientTrigger.TimeStamp(timestamp)/ResamplePeriod);
+        end
+        %Reconfig
+        for timestamp = 1:length(TempNEV.Data.Reconfig.TimeStamp)
+            TempNEV.Data.Reconfig.TimeStamp(timestamp) = TempNEV.Data.Reconfig.TimeStamp(timestamp)+round(TempNEV.Data.Reconfig.TimeStamp(timestamp)/ResamplePeriod);
+        end
+
+        if ~isempty(TempNEV.Data.Tracking)
+            uiwait(msgbox('This version does not operate on tracking data timestamps. Please contact Blackrock Support.','ERROR','modal'));
+        end
+
+        saveNEVSync(TempNEV);
+    end
+end
+
+% Finish the report.
+fclose(ReportFID);
 
 %% Wrap Up
+return
 
