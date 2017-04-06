@@ -41,15 +41,19 @@ function CorrectDriftWithoutSignal (Method,DivideIntoThirds)
 % Version 1.9
 % - Allow division into thirds as an optional parameter
 %
+% Version 2.0
+% - Allow use of paused files.
 %
 
 
-Version = '1.9';
+Version = '2.0';
 
 TestMethod = 1; %Flag to set for faster processing method (basically now used as default method).
 NumberOfFiles = 2; %Has to stay 2 for now as this script only operates on file pairs.
 SkipThirds = 0; % A flag used later for small files. 
-PacketLoss = 0; % A flag set to attempt to correct packet loss. 
+for i = 1:NumberOfFiles
+    PacketLoss(i) = 0; % A flag set to attempt to correct packet loss. 
+end
 
 %% Select files to be drift corrected
 
@@ -118,6 +122,7 @@ clear TempMetaData
 % each entry in the NSP cell structure
 for i = 1:NumberOfFiles
     NSP{i} = openNSx(Filename{i},['c:' num2str(Channel{i}(1)) ':' num2str(Channel{i}(end))]);
+    NSPOrig{i} = openNSx(Filename{i},['c:' num2str(Channel{i}(1)) ':' num2str(Channel{i}(end))]);
 end
 
 % Save meta tags of original files into their own variable as the NSP
@@ -144,7 +149,10 @@ for i = 1:NumberOfFiles
         end
         if SyncIndex(i) == -1 || SyncIndex(i) ~= length(NSP{i}.Data)
             disp('File may have packet loss. Will attempt to correct packet loss.')
-            PacketLoss = 1;
+            PacketLoss(i) = 1;
+            if SyncIndex(i) == -1
+                SyncIndex(i) = 1;
+            end
         end
     else
         % Function can work without cell data, but script must change some
@@ -166,21 +174,18 @@ if Method == 0 || Method == 1
 
     % Create the high pass filter used in this method.
     [b,a] = butter(8,2000/30000,'high');
+    
+    % Refresh the data
+    NSP = NSPOrig;
 
     % Filter the data and remove portions that are not needed (pre-sync
     % periods)
     for i = 1:NumberOfFiles
         if Cell == 1
-            if PacketLoss
-                NumChan = size(NSP{i}.Data{1},1);
-                for ipq = SyncIndex(i):length(NSP{i}.Data)-1
-                    PauseTimestamp = NSP{i}.MetaTags.Timestamp(ipq) + length(NSP{i}.Data{ipq});
-                    NextSegTimestamp = NSP{i}.MetaTags.Timestamp(ipq+1);
-                    NSP{i}.Data{ipq} = [NSP{i}.Data{ipq} zeros(NumChan,NextSegTimestamp-PauseTimestamp)];
+            if PacketLoss(i)
+                for idx = 1:length(NSP{i}.Data)
+                    NSP{i}.Data{idx} = filtfilt(b,a,double(NSP{i}.Data{idx})');
                 end
-                NSP{i}.Data = cell2mat(NSP{i}.Data(SyncIndex(i):end));
-                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
-                NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
             else  
                 NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
             end
@@ -191,28 +196,46 @@ if Method == 0 || Method == 1
 
     % Reduce dimensionality and noise by averaging the matrix we just filtered.
     for i = 1:NumberOfFiles
-        if size(NSP{i}.Data,2) > 1
-            NSP{i}.Data = mean(NSP{i}.Data');
+        if PacketLoss(i)
+            for idx = 1:length(NSP{i}.Data)
+                NSP{i}.Data{idx} = mean(NSP{i}.Data{idx}');
+            end
+        else
+            if size(NSP{i}.Data,2) > 1
+                NSP{i}.Data = mean(NSP{i}.Data');
+            end
         end
     end
 
     % Find the shortest file time (can't compare files outside of that range)
     for i = 1:NumberOfFiles
-        DataLength(i) = length(NSP{i}.Data);
+        if PacketLoss(i)
+            DataLength(i) = NSP{i}.MetaTags.Timestamp(end)+length(NSP{i}.Data{end});
+        else
+            DataLength(i) = length(NSP{i}.Data);
+        end
     end
     EndPoint = min(DataLength);
     clear DataLength
 
     % Perform Cross Correlation
+    for i = 1:NumberOfFiles
+        if PacketLoss(i)
+            DataToXcorr{i} = NSP{i}.Data{SyncIndex(i)}(1:300000);
+        else
+            DataToXcorr{i} = NSP{i}.Data(1:300000);
+        end
+    end
+    
     SamplingRate = 30000; % Ensured 30k compliance earlier.
-    [acor,lag] = xcorr(NSP{1}.Data(1:300000), NSP{2}.Data(1:300000));
+    [acor,lag] = xcorr(DataToXcorr{1}, DataToXcorr{2});
     [~, I] = max(abs(acor));
     firstlagdiff = lag(I); % Number of samples difference at this stage in the file. This is used for validation of our method by comparing it to timestamp offset.
 
     for i = 1:NumberOfFiles
         if Cell == 1
-            if PacketLoss
-                DataTimestamps(i) = NSP{i}.MetaTags.Timestamp;
+            if PacketLoss(i)
+                DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
             else
                 DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i)); %Get timestamp value of our data cell
             end
@@ -258,21 +281,18 @@ if Method == 0 || Method == 2
 
     % Create the high pass filter used in this method.
     [b,a] = butter(8,200/30000,'low');
+    
+    % Refresh the data
+    NSP = NSPOrig;
 
     % Filter the data and remove portions that are not needed (pre-sync
     % periods)
     for i = 1:NumberOfFiles
         if Cell == 1
-            if PacketLoss
-                NumChan = size(NSP{i}.Data{1},1);
-                for ipq = SyncIndex(i):length(NSP{i}.Data)-1
-                    PauseTimestamp = NSP{i}.MetaTags.Timestamp(ipq) + length(NSP{i}.Data{ipq});
-                    NextSegTimestamp = NSP{i}.MetaTags.Timestamp(ipq+1);
-                    NSP{i}.Data{ipq} = [NSP{i}.Data{ipq} zeros(NumChan,NextSegTimestamp-PauseTimestamp)];
+            if PacketLoss(i)
+                for idx = 1:length(NSP{i}.Data)
+                    NSP{i}.Data{idx} = filtfilt(b,a,double(NSP{i}.Data{idx})');
                 end
-                NSP{i}.Data = cell2mat(NSP{i}.Data(SyncIndex(i):end));
-                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
-                NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
             else  
                 NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
             end
@@ -283,27 +303,49 @@ if Method == 0 || Method == 2
 
     % Reduce dimensionality and noise by averaging the matrix we just filtered.
     for i = 1:NumberOfFiles
-        if size(NSP{i}.Data,1) > 1
-            NSP{i}.Data = mean(NSP{i}.Data');
+        if PacketLoss(i)
+            for idx = 1:length(NSP{i}.Data)
+                NSP{i}.Data{idx} = mean(NSP{i}.Data{idx}');
+            end
+        else
+            if size(NSP{i}.Data,2) > 1
+                NSP{i}.Data = mean(NSP{i}.Data');
+            end
         end
     end
 
     % Find the shortest file time (can't compare files outside of that range)
     for i = 1:NumberOfFiles
-        DataLength(i) = length(NSP{i}.Data);
+        if PacketLoss(i)
+            DataLength(i) = NSP{i}.MetaTags.Timestamp(end)+length(NSP{i}.Data{end});
+        else
+            DataLength(i) = length(NSP{i}.Data);
+        end
     end
     EndPoint = min(DataLength);
     clear DataLength
 
     % Perform Cross Correlation
+    for i = 1:NumberOfFiles
+        if PacketLoss(i)
+            DataToXcorr{i} = NSP{i}.Data{SyncIndex(i)}(1:300000);
+        else
+            DataToXcorr{i} = NSP{i}.Data(1:300000);
+        end
+    end
+    
     SamplingRate = 30000; % Ensured 30k compliance earlier.
-    [acor,lag] = xcorr(NSP{1}.Data(1:300000), NSP{2}.Data(1:300000));
+    [acor,lag] = xcorr(DataToXcorr{1}, DataToXcorr{2});
     [~, I] = max(abs(acor));
     firstlagdiff = lag(I); % Number of samples difference at this stage in the file. This is used for validation of our method by comparing it to timestamp offset.
 
     for i = 1:NumberOfFiles
-        if Cell == 1;
-            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i)); %Get timestamp value of our data cell
+        if Cell == 1
+            if PacketLoss(i)
+                DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+            else
+                DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i)); %Get timestamp value of our data cell
+            end
         else
             DataTimestamps(i) = NSP{i}.MetaTags.Timestamp; % If no cell, then only single timestamp value exists
         end
@@ -322,15 +364,14 @@ if Method == 0 || Method == 2
 
     % If the low frequency method correctly predicts that actual offset of the
     % files then we have a winner. Allow some jitter/leniency.
-    if abs(firstlagdiff) < (abs(max(DataTimestamps) - min(DataTimestamps))+10)
+    if abs(firstlagdiff) < (abs(max(DataTimestamps) - min(DataTimestamps))+10) || Method == 2
         disp('Low frequency component found. Proceding with Low Frequency method.')
-        Method = 2; % 2==LowFrequencyMethod Later
+        Method = 2; % 2==LowFrequencyMethod
         ModeComment = 'Low Frequency';
     else
         disp('No low frequency component. Moving to test next method.')
         Method = 0; %Remain the same
     end
-
 end
 
 
@@ -341,9 +382,16 @@ end
 % If no method is yet assigned or is the already assigned method, then this is considered a possible method and the data from this segment is gathered.  
 if Method == 0 || Method == 3
     
+    % Refresh the Data
+    NSP = NSPOrig;
+    
     % Find the shortest file time (can't compare files outside of that range)
     for i = 1:NumberOfFiles
-        DataLength(i) = length(NSP{i}.Data);
+        if PacketLoss(i)
+            DataLength(i) = NSP{i}.MetaTags.Timestamp(end)+length(NSP{i}.Data{end})-NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+        else
+            DataLength(i) = length(NSP{i}.Data);
+        end
     end
     EndPoint = min(DataLength);
     clear DataLength
@@ -363,7 +411,7 @@ if Method == 0 || Method == 3
          if (exist(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])))
              TempNEV = openNEV(fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev']),'nosave','nomat');
              disp(strcat('Found:',fullfile(NSP{i}.MetaTags.FilePath, [NSP{i}.MetaTags.Filename '.nev'])));
-             if ~isempty(NEV.Data.SerialDigitalIO.TimeStamp) 
+             if ~isempty(TempNEV.Data.SerialDigitalIO.TimeStamp) 
                  if isempty(DataToResample)
                      DataToResample = i;
                  else
@@ -377,7 +425,7 @@ if Method == 0 || Method == 3
      if isempty(DataToResample)
          disp('No digital events found (or no NEV files found), so script cannot determine upsample NSP using prediction method.')
          disp('Hard code which NSP should be chosen by editing this value below, or make sure that the NEV files are visible to the script.')
-         DataToResample = 2;
+         DataToResample = 1;
          %return
      end
      
@@ -385,17 +433,17 @@ if Method == 0 || Method == 3
     % periods)
     for i = 1:NumberOfFiles
         if Cell == 1
-            if PacketLoss
+            if PacketLoss(i) % Remove pauses.
                 NumChan = size(NSP{i}.Data{1},1);
                 for ipq = SyncIndex(i):length(NSP{i}.Data)-1
                     PauseTimestamp = NSP{i}.MetaTags.Timestamp(ipq) + length(NSP{i}.Data{ipq});
                     NextSegTimestamp = NSP{i}.MetaTags.Timestamp(ipq+1);
                     NSP{i}.Data{ipq} = [NSP{i}.Data{ipq} zeros(NumChan,NextSegTimestamp-PauseTimestamp)];
                 end
-                NSP{i}.Data = cell2mat(NSP{i}.Data(SyncIndex(i):end));
+                NSP{i}.Data = cell2mat(NSP{i}.Data(SyncIndex(i):end))';
                 NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
             else  
-                NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
+                NSP{i}.Data = NSP{i}.Data{SyncIndex(i)}';
             end
         else
             NSP{i}.Data = NSP{i}.Data;
@@ -405,22 +453,18 @@ if Method == 0 || Method == 3
     % Reduce dimensionality and noise by averaging the matrix we just filtered.
     for i = 1:NumberOfFiles
         if size(NSP{i}.Data,1) > 1
-            NSP{i}.Data = mean(NSP{i}.Data);
+            NSP{i}.Data = mean(NSP{i}.Data');
         end
     end
 
-    % Perform Cross Correlation
+    % Perform cross correlation
     SamplingRate = 30000; % Ensured 30k compliance earlier.
     [acor,lag] = xcorr(NSP{1}.Data(1:300000), NSP{2}.Data(1:300000));
     [~, I] = max(abs(acor));
     firstlagdiff = lag(I); % Number of samples difference at this stage in the file. This is used for validation of our method by comparing it to timestamp offset.
 
     for i = 1:NumberOfFiles
-        if Cell == 1;
-            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i)); %Get timestamp value of our data cell
-        else
-            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp; % If no cell, then only single timestamp value exists
-        end
+        DataTimestamps(i) = NSP{i}.MetaTags.Timestamp; % If no cell, then only single timestamp value exists
     end
 
     % Attempt to split file into thirds to save on RAM. These numbers
@@ -449,50 +493,67 @@ fprintf(ReportFID,'Mode:');
 fprintf(ReportFID,ModeComment);
 fprintf(ReportFID,'\n');
 
-% Perform Cross Correlation at various points in the file as a way of
-% validating the signal 
-lagdiff = [];% Used to store the lag of the file near the endpoint. Difference between this and first lagdiff is total drift up to that point in the file.
-NumberOfLagPoints = 20;
-for i = 1:NumberOfLagPoints
-    if i == NumberOfLagPoints
-        [acor,lag] = xcorr(NSP{1}.Data(EndPoint-300000:EndPoint), NSP{2}.Data(EndPoint-300000:EndPoint));
-    else
-        LagSamplePoint = round(EndPoint/(NumberOfLagPoints-i));
-        if LagSamplePoint < 300000
-            [acor,lag] = xcorr(NSP{1}.Data(1:LagSamplePoint), NSP{2}.Data(1:LagSamplePoint));
+% Perform Cross Correlation
+for i = 1:NumberOfFiles
+    if PacketLoss(i)
+        if Method == 3
+            DataToXcorr{i} = NSP{i}.Data(EndPoint-300000:EndPoint);
         else
-            [acor,lag] = xcorr(NSP{1}.Data(LagSamplePoint-300000:LagSamplePoint), NSP{2}.Data(LagSamplePoint-300000:LagSamplePoint));
+            DataToXcorr{i} = NSP{i}.Data{end}(EndPoint-NSP{i}.MetaTags.Timestamp(end)-300000:EndPoint-NSP{i}.MetaTags.Timestamp(end));
         end
+    else
+        DataToXcorr{i} = NSP{i}.Data(EndPoint-300000:EndPoint);
     end
-    [~, I] = max(abs(acor));
-    %plot(acor);
-    lagdiff(i) = lag(I);
 end
-clear LagSamplePoint
-clear SamplingRate
-clear acor
-clear lag
-clear I
 
+if PacketLoss(1) == 1 || PacketLoss(2) == 1
+    [acor,lag] = xcorr(DataToXcorr{1}, DataToXcorr{2});
+    [~, I] = max(abs(acor));
+    EndLag = lag(I);
+else
+    % Perform Cross Correlation at various points in the file as a way of
+    % validating the signal 
+    lagdiff = [];% Used to store the lag of the file near the endpoint. Difference between this and first lagdiff is total drift up to that point in the file.
+    NumberOfLagPoints = 20;
+    for i = 1:NumberOfLagPoints
+        if i == NumberOfLagPoints
+            [acor,lag] = xcorr(NSP{1}.Data(EndPoint-300000:EndPoint), NSP{2}.Data(EndPoint-300000:EndPoint));
+        else
+            LagSamplePoint = round(EndPoint/(NumberOfLagPoints-i));
+            if LagSamplePoint < 300000
+                [acor,lag] = xcorr(NSP{1}.Data(1:LagSamplePoint), NSP{2}.Data(1:LagSamplePoint));
+            else
+                [acor,lag] = xcorr(NSP{1}.Data(LagSamplePoint-300000:LagSamplePoint), NSP{2}.Data(LagSamplePoint-300000:LagSamplePoint));
+            end
+        end
+        [~, I] = max(abs(acor));
+        %plot(acor);
+        lagdiff(i) = lag(I);
+    end
+    clear LagSamplePoint
+    clear SamplingRate
+    clear acor
+    clear lag
+    clear I
 
-lm = fitlm([1:length(lagdiff)],lagdiff);
-Intercept = lm.Coefficients{1,1};
-Coefficient = lm.Coefficients{2,1};
-EndLag = round(Intercept+Coefficient*NumberOfLagPoints);
-LagDifferenceCalculation = abs(lagdiff(NumberOfLagPoints)-EndLag);
+    lm = fitlm([1:length(lagdiff)],lagdiff);
+    Intercept = lm.Coefficients{1,1};
+    Coefficient = lm.Coefficients{2,1};
+    EndLag = round(Intercept+Coefficient*NumberOfLagPoints);
+    LagDifferenceCalculation = abs(lagdiff(NumberOfLagPoints)-EndLag);
 
-fprintf(ReportFID,'Intercept: ');
-fprintf(ReportFID,num2str(Intercept));
-fprintf(ReportFID,'\n');
+    fprintf(ReportFID,'Intercept: ');
+    fprintf(ReportFID,num2str(Intercept));
+    fprintf(ReportFID,'\n');
 
-fprintf(ReportFID,'Coefficient: ');
-fprintf(ReportFID,num2str(Coefficient));
-fprintf(ReportFID,'\n');
+    fprintf(ReportFID,'Coefficient: ');
+    fprintf(ReportFID,num2str(Coefficient));
+    fprintf(ReportFID,'\n');
 
-fprintf(ReportFID,'R Squared: ');
-fprintf(ReportFID,num2str(lm.Rsquared.Ordinary));
-fprintf(ReportFID,'\n');
-
+    fprintf(ReportFID,'R Squared: ');
+    fprintf(ReportFID,num2str(lm.Rsquared.Ordinary));
+    fprintf(ReportFID,'\n');
+end
 
 % If Lag Amount is Negative, NSP1 Data needs to be resampled at a higher
 % rate. If Positive, NSP2 needs to be resampled at a higher rate.
@@ -512,15 +573,28 @@ end
 % Original length is/was used as a check to see that our total data
 % length had increased by the expected amount as a crude way of
 % checking if resampling had been properly aplied. 
-OriginalLength = length(NSP{DataToResample}.Data);
-
-% Add to report the timing offset throughout the file.
-for i = 1:NumberOfLagPoints
-    fprintf(ReportFID,['lagdiff ' num2str(i) ': ']);
-    fprintf(ReportFID,num2str(lagdiff(i)));
-    fprintf(ReportFID,'\n');
+if PacketLoss(DataToResample)
+    if Method == 3
+        OriginalLength = length(NSP{DataToResample}.Data);
+    else
+        OriginalLength = length(NSP{DataToResample}.Data{end}) + NSP{DataToResample}.MetaTags.Timestamp(end);
+    end
+else
+    OriginalLength = length(NSP{DataToResample}.Data);
 end
 
+% Add to report the timing offset throughout the file.
+if PacketLoss(1) == 1 || PacketLoss(2) == 1
+    fprintf(ReportFID,['lagdiff: ']);
+    fprintf(ReportFID,num2str(EndLag));
+    fprintf(ReportFID,'\n');
+else
+    for i = 1:NumberOfLagPoints
+        fprintf(ReportFID,['lagdiff ' num2str(i) ': ']);
+        fprintf(ReportFID,num2str(lagdiff(i)));
+        fprintf(ReportFID,'\n');
+    end
+end
 % Total drift amount is one of the most useful values generated. It
 % is saved to the report here. 
 if Method == 3
@@ -546,6 +620,7 @@ disp('Calculations complete. Opening full data file for drift correction. This m
 % different way, but since the NSP structure is a way to maintain
 % consistency in information type in this script, I did it.
 clear NSP
+clear NSPOrig
 
 % Do once for each file to resample the original 30k data. This will
 % involve opening the whole file so could be very RAM intensive. 
@@ -566,7 +641,7 @@ for i = 1:NumberOfFiles
 
         % If data is cellular (has proper resync events), only a portion of it is needed. 
         if Cell == 1     
-            if PacketLoss
+            if PacketLoss(i)
                 NumChan = size(NSP{i}.Data{1},1);
                 for ipq = SyncIndex(i):length(NSP{i}.Data)-1
                     PauseTimestamp = NSP{i}.MetaTags.Timestamp(ipq) + length(NSP{i}.Data{ipq});
@@ -626,111 +701,112 @@ for i = 1:NumberOfFiles
 
     % Creates a matrix of file types and elminates ones that have
     % already been used. 
-    ValidFileTypes = {};
-        for idx = 1:NumberOfFiles
-            FileExtTypes = {'.ns1' '.ns2' '.ns3' '.ns4' '.ns5' '.ns6'};
-            ValidTypesIndices = [];
-            for Type = 1:length(FileExtTypes)
-                if ~strcmpi(FileExtTypes{Type},NSPMetaInfo{i}.MetaTags.FileExt)
-                    ValidTypesIndices = [ValidTypesIndices Type];
-                end
-            end
-            ValidFileTypes{idx} = ValidTypesIndices;
-        end
-
-    % For each available file type, it attempts to look for a file.
-    for Type = ValidFileTypes{i}
-        TempFilename = fullfile(NSPMetaInfo{i}.MetaTags.FilePath, [NSPMetaInfo{i}.MetaTags.Filename FileExtTypes{Type}]);
-
-        % If the file exists, it is time to perform the exact same
-        % things that we did above, but on the new file. 
-        if exist(TempFilename)
-            disp(strcat('Found:',TempFilename));
-            TempStructure = openNSx(TempFilename,'noread');
-            EndPacket = TempStructure.MetaTags.DataPoints;
-            TimestampScale = 30000/TempStructure.MetaTags.SamplingFreq; % Used to scale how many timestamps to insert (downsampled upsample value)
-            if DivideIntoThirds == 1
-                SubSectionRepeats = 3;
-            else
-                SubSectionRepeats = 1;
-            end
-            for ixxy = 1:SubSectionRepeats
-                NSPThirds(1) = floor(length(TempStructure.MetaTags.ChannelID)/3);
-                if NSPThirds(1) == 0
-                    NSPThirds(1) = 1;
-                end
-                NSPThirds(2) = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
-                NSPThirds(3) = length(TempStructure.MetaTags.ChannelID);
-                
-                if range(NSPThirds) < 2
-                    SkipThirds = 1;
-                end
-                
-                if DivideIntoThirds == 1 && SkipThirds == 0 % If divide into thirds, then ixxy will be 1:3 and this switch will hit each third, otherwise skip and just open the file. ixxy will be 1 and this loop will go once.
-                    switch(ixxy)
-                        case 1;
-                            NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds(1))]);
-                        case 2;
-                            NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(1)+1) ':' num2str(NSPThirds(2))]); 
-                        case 3;
-                            NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(2)+1) ':' num2str(NSPThirds(3))]); 
+    if PacketLoss(i) ~= 1
+        ValidFileTypes = {};
+            for idx = 1:NumberOfFiles
+                FileExtTypes = {'.ns1' '.ns2' '.ns3' '.ns4' '.ns5' '.ns6'};
+                ValidTypesIndices = [];
+                for Type = 1:length(FileExtTypes)
+                    if ~strcmpi(FileExtTypes{Type},NSPMetaInfo{i}.MetaTags.FileExt)
+                        ValidTypesIndices = [ValidTypesIndices Type];
                     end
+                end
+                ValidFileTypes{idx} = ValidTypesIndices;
+            end
+
+        % For each available file type, it attempts to look for a file.
+        for Type = ValidFileTypes{i}
+            TempFilename = fullfile(NSPMetaInfo{i}.MetaTags.FilePath, [NSPMetaInfo{i}.MetaTags.Filename FileExtTypes{Type}]);
+
+            % If the file exists, it is time to perform the exact same
+            % things that we did above, but on the new file. 
+            if exist(TempFilename)
+                disp(strcat('Found:',TempFilename));
+                TempStructure = openNSx(TempFilename,'noread');
+                EndPacket = TempStructure.MetaTags.DataPoints;
+                TimestampScale = 30000/TempStructure.MetaTags.SamplingFreq; % Used to scale how many timestamps to insert (downsampled upsample value)
+                if DivideIntoThirds == 1
+                    SubSectionRepeats = 3;
                 else
-                    NSx = openNSx(TempFilename); 
+                    SubSectionRepeats = 1;
                 end
+                for ixxy = 1:SubSectionRepeats
+                    NSPThirds(1) = floor(length(TempStructure.MetaTags.ChannelID)/3);
+                    if NSPThirds(1) == 0
+                        NSPThirds(1) = 1;
+                    end
+                    NSPThirds(2) = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
+                    NSPThirds(3) = length(TempStructure.MetaTags.ChannelID);
 
-                if DataToResample == i
-                    if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
-                        NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
-                        NSx.MetaTags.Timestamp = 0;
-                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                        TempEndPoint = round(EndPoint/TimestampScale);
-                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                        if TestMethod == 1
-                            tic
-                            RepeatingArray = ones(1,length(NSx.Data));
-                            RepeatingArray(1:TempResamplePeriod:end) = 2;
-                            NSx.Data = repelem(NSx.Data,1,RepeatingArray);
-                            toc
-                        else
-                            if TotalPeriods > 1
-                                for period = 1:TotalPeriods
-                                    NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                    disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                    if range(NSPThirds) < 2
+                        SkipThirds = 1;
+                    end
+
+                    if DivideIntoThirds == 1 && SkipThirds == 0 % If divide into thirds, then ixxy will be 1:3 and this switch will hit each third, otherwise skip and just open the file. ixxy will be 1 and this loop will go once.
+                        switch(ixxy)
+                            case 1;
+                                NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds(1))]);
+                            case 2;
+                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(1)+1) ':' num2str(NSPThirds(2))]); 
+                            case 3;
+                                NSx = openNSx(TempFilename,['c:' num2str(NSPThirds(2)+1) ':' num2str(NSPThirds(3))]); 
+                        end
+                    else
+                        NSx = openNSx(TempFilename); 
+                    end
+
+                    if DataToResample == i
+                        if and(and(iscell(NSx.Data),Cell==1),length(NSx.Data)==2)
+                            NSx.Data = [zeros(size(NSx.Data{2},1),round(NSx.MetaTags.Timestamp(2)/30000)) NSx.Data{2}];
+                            NSx.MetaTags.Timestamp = 0;
+                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                            TempEndPoint = round(EndPoint/TimestampScale);
+                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
+                            if TestMethod == 1
+                                tic
+                                RepeatingArray = ones(1,length(NSx.Data));
+                                RepeatingArray(1:TempResamplePeriod:end) = 2;
+                                NSx.Data = repelem(NSx.Data,1,RepeatingArray);
+                                toc
+                            else
+                                if TotalPeriods > 1
+                                    for period = 1:TotalPeriods
+                                        NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
+                                        disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                                    end
                                 end
                             end
-                        end
 
-                    elseif not(iscell(NSx.Data))
-                        NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
-                        NSx.MetaTags.Timestamp = 0;
-                        TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
-                        TempEndPoint = round(EndPoint/TimestampScale);
-                        TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
-                        if TestMethod == 1
-                            tic
-                            RepeatingArray = ones(1,length(NSx.Data));
-                            RepeatingArray(1:TempResamplePeriod:end) = 2;
-                            NSx.Data = repelem(NSx.Data,1,RepeatingArray);
-                            toc
-                        else
-                            if TotalPeriods > 1
-                                for period = 1:TotalPeriods
-                                    NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
-                                    disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                        elseif not(iscell(NSx.Data))
+                            NSx.Data = [zeros(size(NSx.Data,1),NSx.MetaTags.Timestamp) NSx.Data];
+                            NSx.MetaTags.Timestamp = 0;
+                            TempResamplePeriod = round((ResamplePeriod/TimestampScale)*TimestampScale);
+                            TempEndPoint = round(EndPoint/TimestampScale);
+                            TotalPeriods = floor(TempEndPoint/TempResamplePeriod);
+                            if TestMethod == 1
+                                tic
+                                RepeatingArray = ones(1,length(NSx.Data));
+                                RepeatingArray(1:TempResamplePeriod:end) = 2;
+                                NSx.Data = repelem(NSx.Data,1,RepeatingArray);
+                                toc
+                            else
+                                if TotalPeriods > 1
+                                    for period = 1:TotalPeriods
+                                        NSx.Data = [NSx.Data(:,1:TempResamplePeriod*period) NSx.Data(:,TempResamplePeriod*period:end)];
+                                        disp([num2str(period) 'of' num2str(TotalPeriods)]);
+                                    end
                                 end
                             end
                         end
                     end
-                end
-                saveNSxSync(NSx,0);
-                if range(NSPThirds) < 2
-                    break;
+                    saveNSxSync(NSx,0);
+                    if range(NSPThirds) < 2
+                        break;
+                    end
                 end
             end
         end
     end
-
     % We are done with continuous data segments, so we can clear this
     % variable to save on some memory.
     clear NSx 
