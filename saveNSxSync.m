@@ -1,4 +1,4 @@
-function saveNSxSync(NSx,varargin)
+function saveNSxSync(NSx,AllowOverwrite,varargin)
 
 %% 
 % Save an .NSx file from an NSx structure (gained by using openNSx)
@@ -6,11 +6,16 @@ function saveNSxSync(NSx,varargin)
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Use: saveNSx(NSx,optionalinputarguments)
 %   NSx:        The NSx data structure.
+%   AllowOverwrite: 0 (No Overwrite Prompts, Files will be saved with extensions) or 1 (Will be prompted if overwriting)
 %   All arguments below are optional:
 %   Filename:   A complete filepath for the output file.
 %               Default: CurrentFilename-Modified.NSx
 
-%saveNSx version = '1.0.0.0';
+%saveNSx version = '1.1';
+%
+% Version 1.1:
+% - Added the ability to ignore overwrite prompts
+%
 
 
 %% 
@@ -18,18 +23,10 @@ function saveNSxSync(NSx,varargin)
 if not(isempty(varargin))
     FilePath = varargin{1};
 else
-    FilePath = [fullfile(NSx.MetaTags.FilePath,NSx.MetaTags.Filename) NSx.MetaTags.FileExt];
-    %[File,Path] = uiputfile;
     FilePath = fullfile(NSx.MetaTags.FilePath,[NSx.MetaTags.Filename '-Aligned-0',NSx.MetaTags.FileExt]);
 end
 
 
-% Accept = input('This script will save a new file with the proper .NSx extensions, but you should retain the previous file. Do you acknowledge the risk inherent in saving modified versions of data files? (Y/N)','s');
-% if strcmpi(Accept,'y')
-% else
-%     disp('Ending Script...');
-%     return
-% end
 
 %%
 % Write the basic header into the file
@@ -39,9 +36,8 @@ ExistCount = 0;
 FinalFilename = 0;
 
 if exist(FilePath)
-    
         if exist(FilePath)
-         
+            if AllowOverwrite
                 disp('File already exists!');
                 OverwritePrompt = input('Would you like to overwrite? (Y/N)','s');
                 if strcmpi(OverwritePrompt,'y')
@@ -52,9 +48,13 @@ if exist(FilePath)
                         ExistCount = ExistCount + 1;
                         FilePath = fullfile(NSx.MetaTags.FilePath,[NSx.MetaTags.Filename '-Aligned-',num2str(ExistCount),NSx.MetaTags.FileExt]);
                     end
-                    
                 end
-            
+            else
+                while exist(FilePath)
+                    ExistCount = ExistCount + 1;
+                    FilePath = fullfile(NSx.MetaTags.FilePath,[NSx.MetaTags.Filename '-Aligned-',num2str(ExistCount),NSx.MetaTags.FileExt]);
+                end
+            end
         end
 end
 
@@ -323,11 +323,6 @@ elseif Paused == 1
 end
 
 fclose(FileID);
-
-
-
-
-
 
 
 
