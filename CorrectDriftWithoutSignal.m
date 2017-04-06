@@ -1,4 +1,4 @@
-function CorrectDriftWithoutSignal (Method) 
+function CorrectDriftWithoutSignal (Method,DivideIntoThirds) 
 %% Correct Drift Without Signal
 % This function attempts to align two data files that have clock drift
 % between the two. It attempts to determine the amount of clock drift by
@@ -12,6 +12,10 @@ function CorrectDriftWithoutSignal (Method)
 % 1 = Force High Frequency Method
 % 2 = Force Low Frequency Method
 % 3 = Force Prediction Method
+%
+% DivideIntoThirds:
+% 0 = Do not divide files into pieces
+% 1 = Divide File Into Pieces
 %
 % Version 1.5
 % - Corrected an issue with prediction method that would cause it %to not work with data that didn't contain cells.
@@ -34,15 +38,18 @@ function CorrectDriftWithoutSignal (Method)
 % - Calculate lag at more points in the file and take a regression as the
 % final lag calculation.
 %
+% Version 1.9
+% - Allow division into thirds as an optional parameter
 %
 %
 
-Version = '1.8';
+
+Version = '1.9';
 
 TestMethod = 1; %Flag to set for faster processing method (basically now used as default method).
 NumberOfFiles = 2; %Has to stay 2 for now as this script only operates on file pairs.
-DivideIntoThirds = 0; % Allows dividing the file into thirds. Currently not functional.
-
+SkipThirds = 0; % A flag used later for small files. 
+PacketLoss = 0; % A flag set to attempt to correct packet loss. 
 
 %% Select files to be drift corrected
 
@@ -135,9 +142,9 @@ for i = 1:NumberOfFiles
             disp('File may have packet loss. This version of the script does not currently work with packet loss.')
             return
         end
-        if SyncIndex(i) < length(NSP{i}.Data)-1
-            disp('File may have packet loss. This version of the script does not currently work with packet loss.')
-            return
+        if SyncIndex(i) == -1 || SyncIndex(i) ~= length(NSP{i}.Data)
+            disp('File may have packet loss. Will attempt to correct packet loss.')
+            PacketLoss = 1;
         end
     else
         % Function can work without cell data, but script must change some
@@ -164,7 +171,19 @@ if Method == 0 || Method == 1
     % periods)
     for i = 1:NumberOfFiles
         if Cell == 1
-            NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
+            if PacketLoss
+                NumChan = size(NSP{i}.Data{1},1);
+                for ipq = SyncIndex(i):length(NSP{i}.Data)-1
+                    PauseTimestamp = NSP{i}.MetaTags.Timestamp(ipq) + length(NSP{i}.Data{ipq});
+                    NextSegTimestamp = NSP{i}.MetaTags.Timestamp(ipq+1);
+                    NSP{i}.Data{ipq} = [NSP{i}.Data{ipq} zeros(NumChan,NextSegTimestamp-PauseTimestamp)];
+                end
+                NSP{i}.Data = cell2mat(NSP{i}.Data(SyncIndex(i):end));
+                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+                NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
+            else  
+                NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
+            end
         else
             NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
         end
@@ -191,8 +210,12 @@ if Method == 0 || Method == 1
     firstlagdiff = lag(I); % Number of samples difference at this stage in the file. This is used for validation of our method by comparing it to timestamp offset.
 
     for i = 1:NumberOfFiles
-        if Cell == 1;
-            DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i)); %Get timestamp value of our data cell
+        if Cell == 1
+            if PacketLoss
+                DataTimestamps(i) = NSP{i}.MetaTags.Timestamp;
+            else
+                DataTimestamps(i) = NSP{i}.MetaTags.Timestamp(SyncIndex(i)); %Get timestamp value of our data cell
+            end
         else
             DataTimestamps(i) = NSP{i}.MetaTags.Timestamp; % If no cell, then only single timestamp value exists
         end
@@ -211,7 +234,7 @@ if Method == 0 || Method == 1
 
     % If the high frequency method correctly predicts that actual offset of the
     % files then we have a winner. Allow some jitter/leniency.
-    if abs(firstlagdiff) < (abs(max(DataTimestamps) - min(DataTimestamps))+10)
+    if abs(firstlagdiff) < (abs(max(DataTimestamps) - min(DataTimestamps))+10) || Method == 1
         disp('High frequency component found. Proceding with High Frequency method.')
         Method = 1; % 1==HighFrequencyMethod Later
         ModeComment = 'High Frequency';
@@ -240,7 +263,19 @@ if Method == 0 || Method == 2
     % periods)
     for i = 1:NumberOfFiles
         if Cell == 1
-            NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
+            if PacketLoss
+                NumChan = size(NSP{i}.Data{1},1);
+                for ipq = SyncIndex(i):length(NSP{i}.Data)-1
+                    PauseTimestamp = NSP{i}.MetaTags.Timestamp(ipq) + length(NSP{i}.Data{ipq});
+                    NextSegTimestamp = NSP{i}.MetaTags.Timestamp(ipq+1);
+                    NSP{i}.Data{ipq} = [NSP{i}.Data{ipq} zeros(NumChan,NextSegTimestamp-PauseTimestamp)];
+                end
+                NSP{i}.Data = cell2mat(NSP{i}.Data(SyncIndex(i):end));
+                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+                NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
+            else  
+                NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
+            end
         else
             NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data)');
         end
@@ -350,7 +385,18 @@ if Method == 0 || Method == 3
     % periods)
     for i = 1:NumberOfFiles
         if Cell == 1
-            NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
+            if PacketLoss
+                NumChan = size(NSP{i}.Data{1},1);
+                for ipq = SyncIndex(i):length(NSP{i}.Data)-1
+                    PauseTimestamp = NSP{i}.MetaTags.Timestamp(ipq) + length(NSP{i}.Data{ipq});
+                    NextSegTimestamp = NSP{i}.MetaTags.Timestamp(ipq+1);
+                    NSP{i}.Data{ipq} = [NSP{i}.Data{ipq} zeros(NumChan,NextSegTimestamp-PauseTimestamp)];
+                end
+                NSP{i}.Data = cell2mat(NSP{i}.Data(SyncIndex(i):end));
+                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+            else  
+                NSP{i}.Data = filtfilt(b,a,double(NSP{i}.Data{SyncIndex(i)})');
+            end
         else
             NSP{i}.Data = NSP{i}.Data;
         end
@@ -419,7 +465,7 @@ for i = 1:NumberOfLagPoints
         end
     end
     [~, I] = max(abs(acor));
-    plot(acor);
+    %plot(acor);
     lagdiff(i) = lag(I);
 end
 clear LagSamplePoint
@@ -504,61 +550,69 @@ clear NSP
 % Do once for each file to resample the original 30k data. This will
 % involve opening the whole file so could be very RAM intensive. 
 for i = 1:NumberOfFiles
-    if DivideIntoThirds == 1
-        for idx = 1:3
+    for idx = 1:(1 + DivideIntoThirds*2)
+        if DivideIntoThirds == 1
             switch(idx)
-                case 1;
+                case 1
                     NSP{i} = openNSx(Filename{i},['c:' num2str(1) ':' num2str(NSPThirds{i,1})]);
-
-                case 2;
+                case 2
                     NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,1}+1) ':' num2str(NSPThirds{i,2})]);
-
-                case 3;
+                case 3
                     NSP{i} = openNSx(Filename{i},['c:' num2str(NSPThirds{i,2}+1) ':' num2str(NSPThirds{i,3})]);
             end
+        else
+            NSP{i} = openNSx(Filename{i});
         end
-    else
-        NSP{i} = openNSx(Filename{i});
-    end
-    
-    % If data is cellular (has proper resync events), only a portion of it is needed. 
-    if Cell == 1;     
-        % Clean up the data and only keep the useful section.
-        NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
-        NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
-    else
-        % No cells in data, so it can be used as is. 
-    end    
-    
-    TotalPeriods = round(EndPoint/ResamplePeriod); %This is equal to drift amount, but it makes the logic a little bit easier to follow for new people.
 
-    % This is where the actual resampling happens.
-    % This is the fastest and most efficient method I could
-    % find for repeating given elements of the array as a
-    % method of upsampling. 
-    if i == DataToResample
-        tic;
-        RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
-        RepeatingArray(1:ResamplePeriod:end) = 2;
-        NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
-        toc;
-    end
-    
-    % Correct disparity between the files caused by resynchronization.
-    % If we did this earlier, then the xcorr could have accidentally
-    % latched on to this manual offset, doing this now just reduces the
-    % risk of that happening and ensures we have the expected offset
-    % when validating this method. 
-    NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
-    NSP{i}.MetaTags.Timestamp = 0;
-    
-    % Save the files using the saveNSxSync function, which is like
-    % SaveNSx, but doesn't have user input prompts. 
-    saveNSxSync(NSP{i});
+        % If data is cellular (has proper resync events), only a portion of it is needed. 
+        if Cell == 1     
+            if PacketLoss
+                NumChan = size(NSP{i}.Data{1},1);
+                for ipq = SyncIndex(i):length(NSP{i}.Data)-1
+                    PauseTimestamp = NSP{i}.MetaTags.Timestamp(ipq) + length(NSP{i}.Data{ipq});
+                    NextSegTimestamp = NSP{i}.MetaTags.Timestamp(ipq+1);
+                    NSP{i}.Data{ipq} = [NSP{i}.Data{ipq} zeros(NumChan,NextSegTimestamp-PauseTimestamp)];
+                end
+                NSP{i}.Data = cell2mat(NSP{i}.Data(SyncIndex(i):end));
+                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+            else  
+                NSP{i}.Data = NSP{i}.Data{SyncIndex(i)};
+                NSP{i}.MetaTags.Timestamp = NSP{i}.MetaTags.Timestamp(SyncIndex(i));
+            end
+        else
+            % No cells in data, so it can be used as is. 
+        end    
 
-    % It is about to be redefined again in the next iteration of the
-    % loop. If it is the last iteration, then we don't need it anymore!
-    clear NSP
+        TotalPeriods = round(EndPoint/ResamplePeriod); %This is equal to drift amount, but it makes the logic a little bit easier to follow for new people.
+
+        % This is where the actual resampling happens.
+        % This is the fastest and most efficient method I could
+        % find for repeating given elements of the array as a
+        % method of upsampling. 
+        if i == DataToResample
+            tic;
+            RepeatingArray = ones(1,length(NSP{DataToResample}.Data));
+            RepeatingArray(1:ResamplePeriod:end) = 2;
+            NSP{DataToResample}.Data = repelem(NSP{DataToResample}.Data,1,RepeatingArray);
+            toc;
+        end
+
+        % Correct disparity between the files caused by resynchronization.
+        % If we did this earlier, then the xcorr could have accidentally
+        % latched on to this manual offset, doing this now just reduces the
+        % risk of that happening and ensures we have the expected offset
+        % when validating this method. 
+        NSP{i}.Data = [zeros(size(NSP{i}.Data,1),NSP{i}.MetaTags.Timestamp) NSP{i}.Data];
+        NSP{i}.MetaTags.Timestamp = 0;
+
+        % Save the files using the saveNSxSync function, which is like
+        % SaveNSx, but doesn't have user input prompts. 
+        saveNSxSync(NSP{i},0);
+
+        % It is about to be redefined again in the next iteration of the
+        % loop. If it is the last iteration, then we don't need it anymore!
+        clear NSP
+    end
 end
 
 clear NSPThirds
@@ -602,9 +656,17 @@ for i = 1:NumberOfFiles
             end
             for ixxy = 1:SubSectionRepeats
                 NSPThirds(1) = floor(length(TempStructure.MetaTags.ChannelID)/3);
+                if NSPThirds(1) == 0
+                    NSPThirds(1) = 1;
+                end
                 NSPThirds(2) = floor(2*(length(TempStructure.MetaTags.ChannelID)/3));
                 NSPThirds(3) = length(TempStructure.MetaTags.ChannelID);
-                if DivideIntoThirds == 1 % If divide into thirds, then ixxy will be 1:3 and this switch will hit each third, otherwise skip and just open the file. ixxy will be 1 and this loop will go once.
+                
+                if range(NSPThirds) < 2
+                    SkipThirds = 1;
+                end
+                
+                if DivideIntoThirds == 1 && SkipThirds == 0 % If divide into thirds, then ixxy will be 1:3 and this switch will hit each third, otherwise skip and just open the file. ixxy will be 1 and this loop will go once.
                     switch(ixxy)
                         case 1;
                             NSx = openNSx(TempFilename,['c:' num2str(1) ':' num2str(NSPThirds(1))]);
@@ -661,7 +723,10 @@ for i = 1:NumberOfFiles
                         end
                     end
                 end
-                saveNSxSync(NSx);
+                saveNSxSync(NSx,0);
+                if range(NSPThirds) < 2
+                    break;
+                end
             end
         end
     end
