@@ -194,7 +194,7 @@ for idx = 1:contSegmentCount
     end
     if not(contDataPointsInSegment(idx) == 0)
         fwrite(contFIDw, contdataHeader, 'char');
-        fwrite(contFIDw, contdataSegment, 'char');
+        fwrite(contFIDw, contdataSegment, '*uint8');
     end
     clear contdataSegment;
     if (~isempty(find(RestartIndex==idx+1))) || (idx == contSegmentCount)
