@@ -2,7 +2,7 @@ function splitFileResets
 
 % splitFileResets
 % 
-% Opens and splits both an NEV and NSx file in pieces timewise at clock
+% Opens and splits both an NEV and NSx file in pieces timewise along clock
 % restarts.
 %
 % Use splitFileResets
@@ -24,10 +24,16 @@ function splitFileResets
 
 % Version History
 %
-% 1.0.0.0:
+% 1.0:
 %   - Initial release.
 %
-% 1.1.0.0:
+% 1.2:
+%   - Corrected a bug where NEV segments would be miscounted as one segment
+%   less than continuous
+%   - Implemented a feature to find correct clock resets in the case of
+%   erroneous data
+%
+% 1.3:
 %   - Improved RAM usage and corrected a few bugs with segment assigments
 %
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -38,8 +44,12 @@ function splitFileResets
 %     splitCount = 2;
 % end
 
+Version = 1.3;
+
+
+
 % Getting the file name
-[contfname, contpath] = getFile('*.NS6', 'Choose an NSx file...');
+[contfname, contpath] = getFile('*.ns', 'Choose an NSx file...');
 if contfname == 0
     disp('No file was selected.');
     if nargout
@@ -60,6 +70,9 @@ if fname == 0
 end
 fext = fname(end-3:end);
 
+LogFile = fopen([path char(fname(1:end-4)) '.txt'],'w');
+
+fprintf(LogFile,'Version: %d', Version)
 
 % Loading the file
 %% Reading Basic Header from file.
@@ -115,6 +128,7 @@ while ftell(contFID)<contEndOfFile
 end
 fseek(contFID,contpositionEOE,'bof')
 fprintf('Found %d Segments in Continuous Data File. ', length(RestartIndex));
+fprintf(LogFile,'Found %d Segments in Continuous Data File.\r\n', length(RestartIndex))
 
 
 %NEV Trackers
@@ -129,17 +143,28 @@ Timestamp = tRawData(1:4,:);
 Timestamp = typecast(Timestamp(:), 'uint32').';
 
 splitPacketStarts = [find(diff(double(Timestamp))<0) length(Timestamp)];
+
+splitPacketNullifier = [];
+for idx = 1:length(splitPacketStarts)-1
+    if Timestamp(splitPacketStarts(idx)+1)<90000
+       %Do nothing
+    else
+        splitPacketNullifier = [splitPacketNullifier idx];
+    end
+end
+
+splitPacketStarts(splitPacketNullifier) = [];
+
+
 %splitPacketBytes = Trackers.countPacketBytes * splitPacketStarts;
 splitPacketBytes = Trackers.countPacketBytes * [splitPacketStarts(1) diff(splitPacketStarts)];
 
 fprintf('Found %d Segments in NEV Data File. ', length(splitPacketStarts));
+fprintf(LogFile,'Found %d Segments in NEV Data File.\r\n', length(splitPacketStarts));
 
 %% Comparing Files and Matching Segments
 if length(splitPacketStarts) == contSegmentCount
     disp('Segment counts match. Continuing to file writing...')
-else
-    disp('Segment counts do not match. Attempting to match segments...')
-    
     contTotalTimestamps = [];
     for idx = 1:contSegmentCount
         if ~isempty(find(RestartIndex==idx))
@@ -153,7 +178,39 @@ else
     end
     disp('Continuous Data Segment Lengths:')
     disp(contTotalTimestamps)
-    nevTotalTimestamps = Timestamp([splitPacketStarts(2:end) length(Timestamp)]);
+    nevTotalTimestamps = Timestamp([splitPacketStarts(1:end)]);
+    disp('NEV Data Segment Lengths:')
+    disp(nevTotalTimestamps)
+    
+    for idx = 1:length(nevTotalTimestamps)
+        if nevTotalTimestamps(idx) > contTotalTimestamps
+            fprintf(LogFile,'Segment %d likely has erroneous data.\r\n', idx);
+            fprintf('Segment %d likely has erroneous data.\r\n', idx);
+        end
+    end
+    
+    nevPairedContinuousSegment = 1:length(splitPacketStarts);
+else
+    disp('Segment counts do not match. Attempting to match segments...')
+    
+    contTotalTimestamps = [];
+    
+    
+    for idx = 1:contSegmentCount
+        if ~isempty(find(RestartIndex==idx))
+           
+            contCurrentRestartIndex = find(RestartIndex==idx);
+            contStartingTimestamp = contTimestamps(idx);
+        end
+        if (~isempty(find(RestartIndex==idx+1))) || (idx == contSegmentCount)
+            contTotalTimestamps(contCurrentRestartIndex) = contTimestamps(idx)+contDataPointsInSegment(idx);
+        end
+    end
+
+    
+    disp('Continuous Data Segment Lengths:')
+    disp(contTotalTimestamps)
+    nevTotalTimestamps = Timestamp([splitPacketStarts(1:end)]);
     disp('NEV Data Segment Lengths:')
     disp(nevTotalTimestamps)
     
@@ -162,10 +219,14 @@ else
     for idx = 1:length(nevTotalTimestamps)
         DoNotRepeat = 0;
         for contSegment = tempcontSegmentCounter:length(contTotalTimestamps)
-            if nevTotalTimestamps(idx) < contTotalTimestamps(contSegment) && DoNotRepeat == 0
+            if nevTotalTimestamps(idx) < contTotalTimestamps(contSegment) && DoNotRepeat ~= 1
                 nevPairedContinuousSegment(idx) = contSegment;
                 tempcontSegmentCounter = contSegment+1;
                 DoNotRepeat = 1;
+            end
+            if contSegment == length(contTotalTimestamps) && DoNotRepeat == 0
+                fprintf('Continuous segment %d not paired.\r\n', contSegment);
+                fprintf('Skipped segment length: %d samples.\r\n', contTotalTimestamps(contSegment));
             end
         end
     end
@@ -178,6 +239,7 @@ end
 %% Writing Files
 
 % Writing NSx File
+
 for idx = 1:contSegmentCount
     if ~isempty(find(RestartIndex==idx))
         contFIDw                    = fopen([contpath contfname(1:end-4) '-s' sprintf('%03d',find(RestartIndex==idx)) contfname(end-3:end)], 'w+', 'ieee-le');
@@ -212,7 +274,7 @@ for idx = 1:length(splitPacketStarts)
     FIDw = fopen([path fname(1:end-4) '-s' sprintf('%03d', nevPairedContinuousSegment(idx)) fname(end-3:end)], 'w+', 'ieee-le');
     fprintf('\nReading NEV segment %d... ', idx);
     % Reading the segment
-    dataSegment = fread(FID, splitPacketBytes(idx), 'char');
+    dataSegment = fread(FID, splitPacketBytes(idx), 'char'); %uint8
     fprintf('Writing NEV segment %d... ', idx);
     % Writing the segmented data into file
     fwrite(FIDw, fileHeader, 'char');
@@ -221,3 +283,5 @@ for idx = 1:length(splitPacketStarts)
     clear dataSegment;
     fclose(FIDw);
 end
+
+fclose(LogFile);
