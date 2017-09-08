@@ -43,7 +43,7 @@ end
 
 %Get sync Pulse Data
 for i = 1:NumberOfFiles
-    NSPCodeData{i} = openNSx(NSPFilenames{1},['c:' num2str(NSPInfo{i}.MetaTags.ChannelCount)]);
+    NSPCodeData{i} = openNSx(NSPFilenames{i},['c:' num2str(NSPInfo{i}.MetaTags.ChannelCount)]);
     NSPCodeData{i}.Data = [repmat(0,size(NSPCodeData{i}.Data,1),NSPInfo{i}.MetaTags.Timestamp) NSPCodeData{i}.Data];
     NSPCodes{i} = syncPatternDetectNSx(NSPCodeData{i}.Data(size(NSPCodeData{i}.Data,1),1:30*NSPInfo{i}.MetaTags.SamplingFreq));
 end
